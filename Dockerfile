@@ -13,7 +13,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # from the base image's preinstalled version.
 RUN playwright install --with-deps chromium
 
-COPY app/ ./app/
+COPY . .
 
 EXPOSE 8000
 
