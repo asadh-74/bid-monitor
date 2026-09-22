@@ -1,0 +1,1985 @@
+{
+  "name": "NY Construction Bid Monitor - DASNY + NYCSCA + Universal AI Fallback (v4)",
+  "nodes": [
+    {
+      "id": "t-manual",
+      "name": "Click to Run",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        400
+      ]
+    },
+    {
+      "id": "t-schedule",
+      "name": "Every 6 Hours (Production)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        580
+      ],
+      "disabled": true,
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "dasny-list",
+      "name": "A1. Fetch DASNY Listing",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        280,
+        100
+      ],
+      "onError": "continueErrorOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "https://www.dasny.org/opportunities/rfps-bids/construction-contracts",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          },
+          "timeout": 20000
+        },
+        "retryOnFail": true,
+        "maxTries": 3,
+        "waitBetweenTries": 3000
+      }
+    },
+    {
+      "id": "dasny-parse-list",
+      "name": "A2. Parse Listing Cards",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        520,
+        100
+      ],
+      "parameters": {
+        "jsCode": "\n// Rebuilt again: the previous version required every field in one exact\n// fixed order, which only matched 2 of 15 real listings. This version\n// finds each card's boundary independently (marked by \"Solicitation #:\")\n// and looks up each field on its own within that boundary - so a listing\n// missing \"Goals\" or with fields in a different order still parses fully.\n\nconst raw = $input.first().json.data || $input.first().json.body || '';\n\nconst hrefMatches = [...raw.matchAll(/href=\"([^\"]+)\"[^>]*>\\s*View the full details for this opportunity/gi)]\n  .map(m => m[1]);\n\nconst text = raw\n  .replace(/<script[\\s\\S]*?<\\/script>/gi, '')\n  .replace(/<style[\\s\\S]*?<\\/style>/gi, '')\n  .replace(/<[^>]+>/g, '\\n')\n  .replace(/&nbsp;/g, ' ')\n  .replace(/&amp;/g, '&')\n  .replace(/[ \\t]+/g, ' ')\n  .replace(/\\n\\s*\\n+/g, '\\n')\n  .trim();\n\nconst marker = /Solicitation #:?/gi;\nconst positions = [];\nlet mm;\nwhile ((mm = marker.exec(text)) !== null) positions.push(mm.index);\n\nfunction field(chunk, label) {\n  const m = chunk.match(new RegExp(label + '\\\\s*:?\\\\s*\\\\n?\\\\s*([^\\\\n]+)', 'i'));\n  return m ? m[1].trim() : '';\n}\n\nconst LABEL_LINE = /^(Solicitation #|Issue Date|Due Date|Classification|Location|Type|Goals|Status)\\s*:?/i;\n\nconst results = [];\nfor (let i = 0; i < positions.length; i++) {\n  const chunkStart = positions[i];\n  const chunkEnd = i + 1 < positions.length ? positions[i + 1] : text.length;\n  const chunk = text.slice(chunkStart, chunkEnd);\n\n  // Title sits just above \"Solicitation #:\" - scan backward through the\n  // text before this card for the last line that isn't itself a field label.\n  const priorStart = i === 0 ? 0 : positions[i - 1];\n  const beforeLines = text.slice(priorStart, chunkStart).split('\\n').map(l => l.trim()).filter(Boolean);\n  let title = '';\n  for (let li = beforeLines.length - 1; li >= 0; li--) {\n    if (!LABEL_LINE.test(beforeLines[li]) && beforeLines[li].length > 3) { title = beforeLines[li]; break; }\n  }\n\n  const solMatch = chunk.match(/Solicitation #:?\\s*([^\\n]+)/i);\n  const solicitation = solMatch ? solMatch[1].trim() : '';\n  if (!solicitation) continue;\n\n  results.push({\n    json: {\n      _rawSource: 'DASNY',\n      solicitationNumber: solicitation,\n      projectNameGuess: title,\n      issueDate: field(chunk, 'Issue Date'),\n      dueDate: field(chunk, 'Due Date'),\n      classification: field(chunk, 'Classification'),\n      locationRaw: field(chunk, 'Location'),\n      typeField: field(chunk, 'Type'),\n      goals: field(chunk, 'Goals'),\n      statusRaw: field(chunk, 'Status'),\n      detailUrl: hrefMatches[i] ? (hrefMatches[i].startsWith('http') ? hrefMatches[i] : `https://www.dasny.org${hrefMatches[i]}`) : ''\n    }\n  });\n}\n\nreturn results.length ? results : [{\n  json: { _parseFailed: true, _rawSource: 'DASNY', _note: 'Zero listings parsed - check raw fetch output directly.' }\n}];\n"
+      }
+    },
+    {
+      "id": "dasny-split",
+      "name": "A3. One Listing at a Time",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        760,
+        100
+      ],
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      }
+    },
+    {
+      "id": "dasny-wait",
+      "name": "A4. Random Delay (Politeness)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1000,
+        40
+      ],
+      "parameters": {
+        "amount": "={{ 5 + Math.floor(Math.random() * 5) }}",
+        "unit": "seconds"
+      }
+    },
+    {
+      "id": "dasny-detail-fetch",
+      "name": "A5. Fetch Detail Page",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1240,
+        40
+      ],
+      "onError": "continueErrorOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.detailUrl }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          },
+          "timeout": 20000
+        },
+        "retryOnFail": true,
+        "maxTries": 2,
+        "waitBetweenTries": 3000
+      }
+    },
+    {
+      "id": "dasny-detail-parse",
+      "name": "A6. Parse Contacts + Details",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1480,
+        40
+      ],
+      "parameters": {
+        "jsCode": "\nconst listing = $('A3. One Listing at a Time').first().json;\nconst raw = $input.first().json.data || $input.first().json.body || '';\n\nconst text = raw\n  .replace(/<script[\\s\\S]*?<\\/script>/gi, '')\n  .replace(/<style[\\s\\S]*?<\\/style>/gi, '')\n  .replace(/<[^>]+>/g, '\\n')\n  .replace(/&nbsp;/g, ' ')\n  .replace(/\\n\\s*\\n+/g, '\\n')\n  .trim();\n\n// Many sites hide emails from plain fetches using Cloudflare's email\n// obfuscation - the real address is scrambled as hex in a data-cfemail\n// attribute and only unscrambled by a script running in a real browser\n// (which is why it looked fine in a screenshot but shows blank here).\n// This decodes it - it's a publicly documented encoding, not a bypass of\n// any access control, the same category as decoding HTML entities.\nfunction decodeCfEmail(encoded) {\n  try {\n    const r = parseInt(encoded.substr(0, 2), 16);\n    let email = '';\n    for (let n = 2; n < encoded.length; n += 2) {\n      email += String.fromCharCode(parseInt(encoded.substr(n, 2), 16) ^ r);\n    }\n    return email;\n  } catch (e) { return ''; }\n}\nfunction findEmail(htmlChunk, textChunk) {\n  const cfMatch = htmlChunk.match(/data-cfemail=\"([a-f0-9]+)\"/i);\n  if (cfMatch) {\n    const decoded = decodeCfEmail(cfMatch[1]);\n    if (decoded.includes('@')) return decoded;\n  }\n  const plain = textChunk.match(/[\\w.+-]+@[\\w-]+\\.[\\w.]{2,}/);\n  return plain ? plain[0] : '';\n}\n\nlet contactPerson = '', contactPhone = '', contactEmail = '', submitToEmail = '';\n\nconst primaryTextMatch = text.match(/Primary Contact([\\s\\S]*?)Submit To Contact/i);\nconst primaryHtmlStart = raw.search(/Primary Contact/i);\nconst primaryHtmlEnd = raw.search(/Submit To Contact/i);\nconst primaryHtmlBlock = (primaryHtmlStart >= 0 && primaryHtmlEnd > primaryHtmlStart) ? raw.slice(primaryHtmlStart, primaryHtmlEnd) : '';\n\nif (primaryTextMatch) {\n  const block = primaryTextMatch[1].trim();\n  const lines = block.split('\\n').map(l => l.trim()).filter(Boolean);\n  contactPerson = lines[0] || '';\n  const phoneMatch = block.match(/Phone:\\s*(\\(?\\d{3}\\)?[\\s.-]?\\d{3}[\\s.-]?\\d{4})/i);\n  contactPhone = phoneMatch ? phoneMatch[1] : '';\n  contactEmail = findEmail(primaryHtmlBlock, block);\n}\n\nconst submitHtmlStart = raw.search(/Submit To Contact/i);\nconst submitHtmlBlock = submitHtmlStart >= 0 ? raw.slice(submitHtmlStart, submitHtmlStart + 3000) : '';\nconst submitTextMatch = text.match(/Submit To Contact([\\s\\S]{0,400})/i);\nsubmitToEmail = findEmail(submitHtmlBlock, submitTextMatch ? submitTextMatch[1] : '');\n\n// Last-resort fallback: if the structured block didn't parse at all, grab\n// any real (non-cloudflare-hidden) email visible anywhere on the page.\nif (!contactEmail) {\n  const anyEmail = text.match(/[\\w.+-]+@[\\w-]+\\.[\\w.]{2,}/);\n  if (anyEmail && !/noreply|webmaster/i.test(anyEmail[0])) contactEmail = anyEmail[0];\n}\n\nconst preBidMatch = text.match(/Pre-?Bid Meeting(?: will be held on| ?:)?\\s*([A-Za-z]+ \\d{1,2},? \\d{4}|\\d{1,2}\\/\\d{1,2}\\/\\d{2,4})/i);\nconst preBidDate = preBidMatch ? preBidMatch[1] : '';\n\nconst valueMatch = text.match(/(?:Estimated (?:Value|Cost)|Contract (?:Value|Amount)|Engineer'?s Estimate)[^\\n$]{0,40}(\\$[\\d,.]+\\s*(?:[MK]|million|thousand)?(?:\\s*-\\s*\\$[\\d,.]+\\s*[MK]?)?)/i);\nconst estimatedValue = valueMatch ? valueMatch[1] : '';\n\nconst docLinks = [...raw.matchAll(/href=\"([^\"]+\\.(?:pdf|docx))\"/gi)].map(m => m[1]).slice(0, 10);\n\nreturn [{\n  json: {\n    ...listing,\n    contactPerson, contactPhone, contactEmail, submitToEmail,\n    preBidDate, estimatedValue,\n    bidDocuments: docLinks.join(', ')\n  }\n}];\n"
+      }
+    },
+    {
+      "id": "dasny-pdf-check",
+      "name": "A6b. Has PDF Bid Document?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1720,
+        40
+      ],
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ ($json.bidDocuments || '').toLowerCase() }}",
+              "rightValue": ".pdf",
+              "operator": {
+                "type": "string",
+                "operation": "contains"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "dasny-pdf-fetch",
+      "name": "A6c. Fetch PDF Document",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1960,
+        -60
+      ],
+      "onError": "continueErrorOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "={{ ($json.bidDocuments || '').split(', ')[0] }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          },
+          "timeout": 30000
+        },
+        "retryOnFail": true,
+        "maxTries": 2,
+        "waitBetweenTries": 3000
+      }
+    },
+    {
+      "id": "dasny-pdf-extract",
+      "name": "A6d. Extract PDF Text",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        2200,
+        -60
+      ],
+      "parameters": {
+        "operation": "pdf",
+        "binaryPropertyName": "data"
+      }
+    },
+    {
+      "id": "dasny-pdf-ai",
+      "name": "A6e. AI Read PDF (Groq - cheap fallback only)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2440,
+        -60
+      ],
+      "onError": "continueErrorOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({model: 'llama-3.3-70b-versatile', temperature: 0, messages: [{role: 'user', content: 'Extract these fields from this procurement document as JSON only, no prose, no markdown fences: contactPerson, contactEmail, contactPhone, estimatedValue, preBidDate. Use an empty string for anything not found.\\\\n\\\\nDOCUMENT TEXT:\\\\n' + ($json.text || '').slice(0, 12000)}]}) }}",
+        "options": {
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "dasny-pdf-merge",
+      "name": "A6f. Merge PDF Data (Fallback Only)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2680,
+        -60
+      ],
+      "parameters": {
+        "jsCode": "\n// PDF data only fills gaps the HTML page left blank - it never overwrites\n// what the HTML page's structured Contacts block already gave us, since\n// that's a reliable fixed structure and free-text PDF extraction isn't.\n\nconst htmlRow = $('A6. Parse Contacts + Details').first().json;\n\nlet extracted = {};\ntry {\n  const raw = $json.choices[0].message.content;\n  const clean = raw.replace(/```json/gi, '').replace(/```/g, '').trim();\n  const match = clean.match(/\\{[\\s\\S]*\\}/);\n  extracted = JSON.parse(match ? match[0] : clean);\n} catch (e) { extracted = {}; }\n\nreturn [{\n  json: {\n    ...htmlRow,\n    contactPerson: htmlRow.contactPerson || extracted.contactPerson || '',\n    contactEmail: htmlRow.contactEmail || extracted.contactEmail || '',\n    contactPhone: htmlRow.contactPhone || extracted.contactPhone || '',\n    estimatedValue: htmlRow.estimatedValue || extracted.estimatedValue || '',\n    preBidDate: htmlRow.preBidDate || extracted.preBidDate || ''\n  }\n}];\n"
+      }
+    },
+    {
+      "id": "dasny-normalize",
+      "name": "A7. Normalize DASNY Row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1720,
+        40
+      ],
+      "parameters": {
+        "jsCode": "\nconst cityCountyMap = {\n  JAMAICA: 'Queens', FLUSHING: 'Queens', BRONX: 'Bronx', BUFFALO: 'Erie',\n  SYRACUSE: 'Onondaga', ALBANY: 'Albany', BROOKLYN: 'Kings', MANHATTAN: 'New York',\n  'NEW YORK': 'New York', ROCHESTER: 'Monroe', YONKERS: 'Westchester'\n};\n\nconst r = $json;\nconst today = new Date().toISOString().slice(0, 10);\n\nfunction toIso(dateStr) {\n  if (!dateStr) return '';\n  const d = new Date(dateStr);\n  return isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);\n}\n\nfunction extractCounty(locationText) {\n  const upper = (locationText || '').toUpperCase();\n  for (const city of Object.keys(cityCountyMap)) {\n    if (upper.includes(city)) return cityCountyMap[city];\n  }\n  return '';\n}\n\nconst bidDateIso = toIso(r.dueDate);\n\nreturn [{\n  json: {\n    \"Project ID\": r.solicitationNumber,\n    \"Project Name\": r.projectNameGuess || '',\n    \"Agency\": \"DASNY\",\n    \"Project Type\": r.classification || '',\n    \"Location\": r.locationRaw || '',\n    \"County\": extractCounty(r.locationRaw),\n    \"Project Stage\": r.statusRaw || '',\n    \"Estimated Value\": r.estimatedValue || '',\n    \"Bid Date\": bidDateIso,\n    \"Pre-Bid Date\": r.preBidDate || '',\n    \"Contractor Type\": 'GC',\n    \"Trade\": r.typeField || '',\n    \"Solicitation #\": r.solicitationNumber,\n    \"Project URL\": r.detailUrl || '',\n    \"Bid Documents\": r.bidDocuments || '',\n    \"Contact Person\": r.contactPerson || '',\n    \"Contact Phone\": r.contactPhone || '',\n    \"Contact Email\": r.contactEmail || '',\n    \"Submit To Email\": r.submitToEmail || '',\n    \"Status\": bidDateIso ? (bidDateIso >= today ? 'Open' : 'Closed') : (r.statusRaw || ''),\n    \"Previous Status\": '',\n    \"Last Checked\": new Date().toISOString(),\n    \"Last Updated\": new Date().toISOString(),\n    \"Change Detected\": 'No',\n    \"Source\": 'DASNY',\n    \"isParseError\": false\n  }\n}];\n"
+      }
+    },
+    {
+      "id": "sca-anticipated-fetch",
+      "name": "B1a. Fetch SCA Anticipated Awards",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        280,
+        400
+      ],
+      "onError": "continueErrorOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "https://data.cityofnewyork.us/resource/tsak-vtv3.json",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "$limit",
+              "value": "25"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 20000
+        },
+        "retryOnFail": true,
+        "maxTries": 3,
+        "waitBetweenTries": 3000
+      }
+    },
+    {
+      "id": "sca-anticipated-parse",
+      "name": "B1b. Parse Anticipated Awards",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        520,
+        400
+      ],
+      "parameters": {
+        "jsCode": "\nconst countyMap = { MANHATTAN: 'New York', BROOKLYN: 'Kings', BRONX: 'Bronx', QUEENS: 'Queens', 'STATEN ISLAND': 'Richmond', 'STATEN IS': 'Richmond' };\n\nlet records = [];\nfor (const item of $input.all()) {\n  if (Array.isArray(item.json)) records.push(...item.json);\n  else records.push(item.json);\n}\nif (!records.length) {\n  return [{ json: { _parseFailed: true, _rawSource: 'NYCSCA-Anticipated', _note: 'API returned zero records.' } }];\n}\n\nreturn records.map(r => {\n  const boro = (r.upcoming_project_borough || '').trim().toUpperCase();\n  return {\n    json: {\n      \"Project ID\": `SCA-${r.upcoming_project_design_number || 'NA'}-${r.upcoming_project_category || ''}`.replace(/\\s+/g, '_'),\n      \"Project Name\": r.upcoming_project_name || r.upcoming_project_description || '',\n      \"Agency\": \"NYC SCA\",\n      \"Project Type\": \"School\",\n      \"Location\": boro ? `${boro.charAt(0)}${boro.slice(1).toLowerCase()}, NY` : '',\n      \"County\": countyMap[boro] || boro,\n      \"Project Stage\": \"Upcoming\",\n      \"Estimated Value\": r.upcoming_project_design_completion_date || '',\n      \"Bid Date\": '', \"Pre-Bid Date\": '', \"Contractor Type\": 'GC',\n      \"Trade\": r.upcoming_project_category || '',\n      \"Solicitation #\": '',\n      \"Project URL\": 'https://data.cityofnewyork.us/d/tsak-vtv3',\n      \"Bid Documents\": '',\n      \"Contact Person\": '', \"Contact Email\": '', \"Submit To Email\": '',\n      \"Status\": \"Upcoming\", \"Previous Status\": '',\n      \"Last Checked\": new Date().toISOString(), \"Last Updated\": new Date().toISOString(),\n      \"Change Detected\": 'No', \"Source\": 'NYCSCA', \"isParseError\": false\n    }\n  };\n});\n"
+      }
+    },
+    {
+      "id": "sca-active-fetch",
+      "name": "B1c. Fetch SCA Active Construction",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        280,
+        550
+      ],
+      "onError": "continueErrorOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "https://data.cityofnewyork.us/resource/8586-3zfm.json",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "$limit",
+              "value": "25"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 20000
+        },
+        "retryOnFail": true,
+        "maxTries": 3,
+        "waitBetweenTries": 3000
+      }
+    },
+    {
+      "id": "sca-active-parse",
+      "name": "B1d. Parse SCA Active Construction",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        520,
+        550
+      ],
+      "parameters": {
+        "jsCode": "\n// Confirmed real fields (from an actual node output screenshot):\n// name, boro, geo_dist, projdesc, award, constype, buildingid,\n// building_address, city, zip_code, borough\n//\n// No contractor or contact field exists anywhere in this dataset - that's\n// not a mapping bug, it's genuinely absent from what NYC publishes here.\n// Contact Person/Email stay honestly blank for this source, same as the\n// Anticipated Awards dataset.\n\nconst countyMap = { MANHATTAN: 'New York', BROOKLYN: 'Kings', BRONX: 'Bronx', QUEENS: 'Queens', 'STATEN ISLAND': 'Richmond', 'STATEN IS': 'Richmond' };\n\nlet records = [];\nfor (const item of $input.all()) {\n  if (Array.isArray(item.json)) records.push(...item.json);\n  else records.push(item.json);\n}\nif (!records.length) {\n  return [{ json: { _parseFailed: true, _rawSource: 'NYCSCA-Active', _note: 'API returned zero records.' } }];\n}\n\nreturn records.map(r => {\n  const boroFull = (r.borough || '').trim().toUpperCase();\n  const address = [r.building_address, r.city, r.zip_code].filter(Boolean).join(', ');\n\n  return {\n    json: {\n      \"Project ID\": `SCA-ACTIVE-${r.buildingid || 'NA'}`.replace(/\\s+/g, '_'),\n      \"Project Name\": r.name || '',\n      \"Agency\": \"NYC SCA\",\n      \"Project Type\": r.constype || 'School',\n      \"Location\": address || (r.city ? `${r.city}, NY` : ''),\n      \"County\": countyMap[boroFull] || r.borough || '',\n      \"Project Stage\": \"Under Construction\",\n      \"Estimated Value\": r.award || '',\n      \"Bid Date\": '', \"Pre-Bid Date\": '',\n      \"Contractor Type\": 'GC',\n      \"Trade\": r.projdesc || '',\n      \"Solicitation #\": '',\n      \"Project URL\": 'https://data.cityofnewyork.us/d/8586-3zfm',\n      \"Bid Documents\": '',\n      \"Contact Person\": '', \"Contact Email\": '', \"Submit To Email\": '',\n      \"Status\": \"Under Construction\", \"Previous Status\": '',\n      \"Last Checked\": new Date().toISOString(), \"Last Updated\": new Date().toISOString(),\n      \"Change Detected\": 'No', \"Source\": 'NYCSCA-Active', \"isParseError\": false\n    }\n  };\n});\n"
+      }
+    },
+    {
+      "id": "d-read-sources",
+      "name": "D1. Read Sources from Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        280,
+        1040
+      ],
+      "parameters": {
+        "operation": "getAll",
+        "documentId": {
+          "__rl": true,
+          "value": "PASTE_YOUR_GOOGLE_SHEET_ID_HERE",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sources",
+          "mode": "name"
+        }
+      }
+    },
+    {
+      "id": "d-filter-universal",
+      "name": "D2. Keep Only Universal-AI Sources",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [
+        520,
+        1040
+      ],
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ (($json.Method || '').toUpperCase() !== 'API') && (($json.Method || '').toUpperCase().includes('AI')) }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "d-loop-sources",
+      "name": "D3. Loop Each Website",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        760,
+        1040
+      ],
+      "parameters": {
+        "batchSize": 1
+      }
+    },
+    {
+      "id": "d-fetch-website",
+      "name": "D4. Fetch Website/API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1000,
+        980
+      ],
+      "onError": "continueErrorOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+          ]
+        },
+        "options": {
+          "allowUnauthorizedCerts": true,
+          "ignoreResponseCode": true,
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          },
+          "timeout": 20000
+        },
+        "retryOnFail": true,
+        "maxTries": 2,
+        "waitBetweenTries": 2000
+      }
+    },
+    {
+      "id": "d-detect-captcha",
+      "name": "D4e. Detect CAPTCHA",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1580,
+        1080
+      ],
+      "parameters": {
+        "jsCode": "\n// Human-in-the-loop CAPTCHA handling: detect common indicators and STOP -\n// never attempt to solve, defeat, or work around a CAPTCHA. This is the\n// legitimate pattern for a real bid-monitoring product: flag it for a\n// person to check manually, and keep every other source running normally.\n\nconst raw = $input.first().json.data || $input.first().json.body || '';\nconst lower = raw.toLowerCase();\nconst INDICATORS = ['captcha', 'recaptcha', 'hcaptcha', 'verify you are human', 'are you a robot', 'cloudflare challenge', 'checking your browser'];\n\nconst hit = INDICATORS.find(kw => lower.includes(kw));\nreturn [{ json: { ...$json, captchaDetected: !!hit, captchaIndicator: hit || '' } }];\n"
+      }
+    },
+    {
+      "id": "d-captcha-branch",
+      "name": "D4f. CAPTCHA Detected?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1700,
+        1080
+      ],
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.captchaDetected }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "d-log-captcha",
+      "name": "D4g. Log CAPTCHA Event (Human Review)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1700,
+        1220
+      ],
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "PASTE_YOUR_GOOGLE_SHEET_ID_HERE",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "CAPTCHA Events",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Source": "={{ $('D3. Loop Each Website').item.json['Source Name'] }}",
+            "URL": "={{ $('D3. Loop Each Website').item.json.URL }}",
+            "Detected At": "={{ new Date().toISOString() }}",
+            "Indicator Found": "={{ $json.captchaIndicator }}",
+            "Status": "pending",
+            "Notes": "Automated processing stopped - needs a person to check this source manually."
+          }
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "d-paging-wait",
+      "name": "D5. Paging Wait",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1700,
+        1040
+      ],
+      "parameters": {
+        "amount": 3,
+        "unit": "seconds"
+      }
+    },
+    {
+      "id": "d-extract-candidates",
+      "name": "D6a. Pre-Extract Candidate Links",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1940,
+        1040
+      ],
+      "parameters": {
+        "jsCode": "\nlet inputData = '';\nif ($input.first().json.data) { inputData = $input.first().json.data; }\nelse if ($input.first().json) { inputData = $input.first().json; }\n\nlet sourceUrl = '';\nif ($('D3. Loop Each Website').item.json.URL) { sourceUrl = $('D3. Loop Each Website').item.json.URL; }\n\nlet agency = 'Unknown Agency';\nif ($('D3. Loop Each Website').item.json['Source Name']) { agency = $('D3. Loop Each Website').item.json['Source Name']; }\nelse if ($('D3. Loop Each Website').item.json.Agency) { agency = $('D3. Loop Each Website').item.json.Agency; }\n\nif ($input.first().json.statusCode >= 400) {\n  return [{ json: { agency: agency, sourceUrl: sourceUrl, isJsonApi: false, candidates: [] } }];\n}\n\nlet isJsonApi = false;\nlet html = '';\n\nif (typeof inputData === 'object') {\n  isJsonApi = true;\n  html = JSON.stringify(inputData);\n} else if (typeof inputData === 'string' && (inputData.trim().startsWith('[{') ? true : inputData.trim().startsWith('{'))) {\n  isJsonApi = true;\n  html = inputData;\n} else {\n  html = inputData;\n}\n\nif (isJsonApi) {\n  if (html.includes('Not found')) { return [{ json: { agency: agency, sourceUrl: sourceUrl, isJsonApi: true, candidates: [] } }]; }\n  if (html.includes('error')) { return [{ json: { agency: agency, sourceUrl: sourceUrl, isJsonApi: true, candidates: [] } }]; }\n  return [{ json: { agency: agency, sourceUrl: sourceUrl, isJsonApi: true, candidates: [{ text: 'JSON API Source', url: sourceUrl }] } }];\n}\n\nlet baseUrl = '';\ntry { baseUrl = new URL(sourceUrl).origin; } catch(e) {}\n\nconst linkMatches = [...html.matchAll(/<a\\s+(?:[^>]*?\\s+)?href=\"([^\"]+)\"[^>]*>([\\s\\S]*?)<\\/a>/gi)];\nconst candidates = [];\nconst seenUrls = new Set();\n\nfor (const match of linkMatches) {\n  let href = match[1].trim();\n  let text = match[2].replace(/<[^>]+>/g, '').trim();\n\n  if (!href) continue;\n  if (href.startsWith('#')) continue;\n  if (href.startsWith('javascript:')) continue;\n\n  if (!href.startsWith('http')) {\n     href = href.startsWith('/') ? baseUrl + href : sourceUrl.replace(/\\/[^\\/]*$/, '/') + href;\n  }\n\n  const lowerHref = href.toLowerCase();\n  if (lowerHref.match(/facebook|twitter|linkedin|\\.css|\\.js|\\.png|\\.jpg/)) continue;\n\n  if (!seenUrls.has(href)) {\n    seenUrls.add(href);\n    let finalText = text ? text : 'Link';\n    candidates.push({ text: finalText, url: href });\n  }\n}\n\nreturn [{ json: { agency: agency, sourceUrl: sourceUrl, isJsonApi: false, candidates: candidates.slice(0, 15) } }];\n"
+      }
+    },
+    {
+      "id": "d-ai-navigator",
+      "name": "D6b. AI: Filter Bid Links",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.6,
+      "position": [
+        2180,
+        1040
+      ],
+      "parameters": {
+        "promptType": "define",
+        "text": "Analyze this list of candidate links extracted from a procurement website. Select the top 5 links that represent specific construction or infrastructure bid opportunities, RFPs, or PDF contracts.\n\nCRITICAL: only use 'url' values that appear EXACTLY as given in the Candidate Links list below. Never invent, guess, or modify a URL. If none of the candidates look like real bid opportunities, return an empty array [].\n\nReturn ONLY a raw JSON array of objects with keys: 'solicitationNumber', 'projectName', 'url'. Do not output any prose or commentary.\n\nCandidate Links:\n={{ JSON.stringify($json.candidates) }}",
+        "options": {
+          "systemMessage": "You are an expert procurement link filter agent. Output ONLY a valid JSON array."
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "id": "d-gemini-nav",
+      "name": "Gemini Flash (Nav)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [
+        2140,
+        1220
+      ],
+      "parameters": {
+        "model": "gemini-3.1-flash-lite",
+        "options": {
+          "temperature": 0.1
+        }
+      }
+    },
+    {
+      "id": "d-parse-discovered",
+      "name": "D7. Parse & Fallback Links",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2420,
+        1040
+      ],
+      "parameters": {
+        "jsCode": "\nlet inputJson = {};\nif ($input.first() && $input.first().json) { inputJson = $input.first().json; }\n\nlet candidatesData = {};\nif ($('D6a. Pre-Extract Candidate Links').first() && $('D6a. Pre-Extract Candidate Links').first().json) {\n    candidatesData = $('D6a. Pre-Extract Candidate Links').first().json;\n}\n\nlet agency = candidatesData.agency || 'Unknown Agency';\nlet candidates = candidatesData.candidates || [];\nconst realUrls = new Set(candidates.map(c => c.url));\nlet bids = [];\n\nif (candidatesData.isJsonApi && candidates.length > 0) {\n  bids = [{ solicitationNumber: 'API-DATA', projectName: 'API Source Data', url: candidates[0].url }];\n} else {\n  let rawOutput = inputJson.output || inputJson.text || '';\n  if (rawOutput) {\n    try {\n      let cleanStr = rawOutput.replace(/```json/gi, '').replace(/```/g, '').trim();\n      const match = cleanStr.match(/\\[[\\s\\S]*\\]/);\n      if (match) cleanStr = match[0];\n      const parsed = JSON.parse(cleanStr);\n      if (Array.isArray(parsed) && parsed.length > 0) {\n        // Hallucination guard: an LLM can return perfectly valid-looking JSON\n        // with a URL it invented rather than one that's actually on the page\n        // (seen in practice: a fabricated \"procurement.example.gov\" bid).\n        // Only accept a bid whose URL genuinely came from this page's real\n        // extracted links - anything else gets silently dropped, not written.\n        bids = parsed.filter(b => b.url && realUrls.has(b.url));\n      }\n    } catch(e) {}\n  }\n\n  if (bids.length === 0 && candidates.length > 0) {\n    const keywords = ['bid', 'solicitation', 'rfp', 'contract', 'opportunity', 'project', '.pdf'];\n    const relevant = candidates.filter(c => keywords.some(k => (c.text + c.url).toLowerCase().includes(k)));\n    const selected = relevant.length > 0 ? relevant.slice(0, 5) : [];\n    bids = selected.map((c, idx) => ({ solicitationNumber: `BID-${idx + 1}`, projectName: c.text, url: c.url }));\n  }\n}\n\n// Honest failure signal (the pasted version never set this, so failures\n// never reached the Errors tab) - if nothing was found, say so.\nif (bids.length === 0) {\n  return [{ json: { _isEmpty: \"true\", agency: agency, _parseFailed: true,\n    _rawSource: agency, _note: 'No bid links found on this page - check D6a output directly, or this source may need Method=API/HTML if it has a fixed structure.' } }];\n}\n\nreturn bids.map((b, idx) => ({\n  json: {\n    _isEmpty: \"false\",\n    agency: agency,\n    solicitationNumber: b.solicitationNumber || b.solNum || b.id || `SOL-${idx + 1}`,\n    projectName: b.projectName || b.name || b.title || 'Construction Bid',\n    url: b.url || b.link || b.pdfUrl || ''\n  }\n}));\n"
+      }
+    },
+    {
+      "id": "d-has-bids",
+      "name": "D7b. Has Bids?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2660,
+        1040
+      ],
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json._isEmpty }}",
+              "rightValue": "false",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "d-loop-bids",
+      "name": "D8. Loop Specific Bids",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        2900,
+        1040
+      ],
+      "parameters": {
+        "batchSize": 1
+      }
+    },
+    {
+      "id": "d-rate-wait",
+      "name": "D8b. Rate Limit Wait",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        3140,
+        980
+      ],
+      "parameters": {
+        "amount": 3,
+        "unit": "seconds"
+      }
+    },
+    {
+      "id": "d-is-pdf",
+      "name": "D9. Is it a PDF?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3380,
+        980
+      ],
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ ($json.url || '').toLowerCase() }}",
+              "rightValue": ".pdf",
+              "operator": {
+                "type": "string",
+                "operation": "endsWith"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "d-fetch-pdf",
+      "name": "D10a. Fetch PDF (Binary)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3620,
+        880
+      ],
+      "onError": "continueErrorOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('D8. Loop Specific Bids').item.json.url }}",
+        "options": {
+          "allowUnauthorizedCerts": true,
+          "ignoreResponseCode": true,
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          },
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "d-extract-pdf",
+      "name": "D11a. Extract PDF Text",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        3860,
+        880
+      ],
+      "parameters": {
+        "operation": "pdf",
+        "binaryPropertyName": "data"
+      },
+      "continueOnFail": true
+    },
+    {
+      "id": "d-fetch-html",
+      "name": "D10b. Fetch Detail Page/API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3620,
+        1080
+      ],
+      "onError": "continueErrorOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('D8. Loop Specific Bids').item.json.url }}",
+        "options": {
+          "allowUnauthorizedCerts": true,
+          "ignoreResponseCode": true,
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          },
+          "timeout": 20000
+        }
+      }
+    },
+    {
+      "id": "d-find-linked-pdf",
+      "name": "D10c. Find PDF Links on Detail Page",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3860,
+        1160
+      ],
+      "parameters": {
+        "jsCode": "\n// Contact info often lives on the HTML page itself, but sites also\n// frequently link out to a spec/RFP PDF with additional detail. Rather than\n// choosing HTML *or* PDF, this finds the first real PDF link on the detail\n// page so we can pull its text in too - both sources feed the AI together.\n\nconst raw = $input.first().json.data || $input.first().json.body || '';\nconst match = raw.match(/href=\"([^\"]+\\.pdf)\"/i);\n\nif (!match) return [{ json: { hasLinkedPdf: false, pdfUrl: '', htmlText: raw } }];\n\nlet pdfUrl = match[1];\nif (!pdfUrl.startsWith('http')) {\n  try {\n    const base = new URL($('D8. Loop Specific Bids').item.json.url).origin;\n    pdfUrl = pdfUrl.startsWith('/') ? base + pdfUrl : base + '/' + pdfUrl;\n  } catch (e) { return [{ json: { hasLinkedPdf: false, pdfUrl: '', htmlText: raw } }]; }\n}\nreturn [{ json: { hasLinkedPdf: true, pdfUrl, htmlText: raw } }];\n"
+      }
+    },
+    {
+      "id": "d-has-linked-pdf",
+      "name": "D10d. Has Linked PDF?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        4100,
+        1160
+      ],
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.hasLinkedPdf }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "d-fetch-linked-pdf",
+      "name": "D10e. Fetch Linked PDF (Binary)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4340,
+        1100
+      ],
+      "onError": "continueErrorOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.pdfUrl }}",
+        "options": {
+          "allowUnauthorizedCerts": true,
+          "ignoreResponseCode": true,
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          },
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "d-extract-linked-pdf",
+      "name": "D10f. Extract Linked PDF Text",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        4580,
+        1100
+      ],
+      "parameters": {
+        "operation": "pdf",
+        "binaryPropertyName": "data"
+      },
+      "continueOnFail": true
+    },
+    {
+      "id": "d-prepare-text",
+      "name": "D12. Prepare Text for AI",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4100,
+        1000
+      ],
+      "parameters": {
+        "jsCode": "\n// Combines whichever text sources actually ran for this bid:\n//  - direct-PDF path: this item's own .text (from D11a)\n//  - HTML path: D10c's carried-forward htmlText, plus D10f's linked-PDF\n//    text if a PDF was found and successfully read\n// Using node-name lookups (not relying on multiple raw connections to\n// merge automatically) is what makes this actually combine both sources\n// for the same bid instead of firing twice with half the picture each.\n\nfunction safeFirst(nodeName) {\n  try { return $(nodeName).first().json; } catch (e) { return null; }\n}\n\nconst d10c = safeFirst('D10c. Find PDF Links on Detail Page');\nlet combinedText = '';\n\nif (d10c) {\n  // HTML path (came through D10b -> D10c)\n  combinedText += (d10c.htmlText || '') + '\\n\\n';\n  // If a linked PDF was found and this execution is the one that read it,\n  // $json.text here is that PDF's extracted text - add it too.\n  const linkedPdfText = $json.text;\n  if (typeof linkedPdfText === 'string') combinedText += linkedPdfText + '\\n\\n';\n} else {\n  // Direct-PDF path (came through D10a -> D11a) or its error fallback\n  const directText = $json.text || $json.data || '';\n  combinedText += (typeof directText === 'string' ? directText : JSON.stringify(directText)) + '\\n\\n';\n}\n\ncombinedText = combinedText.substring(0, 100000);\nreturn [{ json: { text: combinedText } }];\n"
+      }
+    },
+    {
+      "id": "d-ai-reader",
+      "name": "D13. AI: Extract Deep Details",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.6,
+      "position": [
+        4340,
+        1000
+      ],
+      "parameters": {
+        "promptType": "define",
+        "text": "Your primary job is finding a real contact person's name and their email address in this procurement document - search the ENTIRE text carefully, including near the bottom and in any 'Contacts', 'Questions', or 'Inquiries' sections. This is the most important part of your task.\n\nOutput ONLY valid JSON with exactly these keys: 'contactPerson', 'contactEmail', 'contactPhone', 'estimatedValue', 'preBidDate', 'bidDate', 'location', 'trade'.\n\nSTRICT INSTRUCTIONS:\n1. 'contactPerson': a genuine individual human name (e.g. 'John Smith'). Never a department or company name like 'Procurement Office' or 'DASNY'. Search thoroughly before giving up - empty string only if truly none exists anywhere in the text.\n2. 'contactEmail': the real email tied to that contact, or the general procurement inbox if that's all that's given. Search thoroughly - empty string only if truly none exists.\n3. 'bidDate': the bid due/closing date, formatted YYYY-MM-DD if possible.\n4. 'location': city/borough and state if stated on the page.\n5. Any other field genuinely not present: empty string. Do not guess or invent values for any field.\n\nDocument Data:\n={{ $json.text }}",
+        "options": {
+          "systemMessage": "You are a precise procurement data extraction agent. Output strictly valid JSON. Never invent information that isn't in the document."
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "id": "d-gemini-read",
+      "name": "Gemini Flash (Read)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [
+        4300,
+        1180
+      ],
+      "parameters": {
+        "model": "gemini-3.1-flash-lite",
+        "options": {
+          "temperature": 0.1
+        }
+      }
+    },
+    {
+      "id": "d-format-sheets",
+      "name": "D14. Format for Sheets",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4580,
+        1000
+      ],
+      "parameters": {
+        "jsCode": "\nlet base = {};\nif ($('D8. Loop Specific Bids').item.json) { base = $('D8. Loop Specific Bids').item.json; }\n\nlet contactEmail = '', contactName = '', contactPhone = '', estimatedValue = '', preBidDate = '', bidDate = '', location = '', trade = '';\nlet aiRaw = '';\nlet aiCallFailed = false;\n\ntry { aiRaw = $input.first().json.output; } catch(e) { aiCallFailed = true; }\n\nif (aiRaw) {\n  try {\n    let cleanJsonStr = aiRaw.replace(/```json/gi, '').replace(/```/g, '').trim();\n    const match = cleanJsonStr.match(/\\{[\\s\\S]*\\}/);\n    if (match) cleanJsonStr = match[0];\n    const ext = JSON.parse(cleanJsonStr);\n    contactEmail = ext.contactEmail || '';\n    contactName = ext.contactPerson || '';\n    contactPhone = ext.contactPhone || '';\n    estimatedValue = ext.estimatedValue || '';\n    preBidDate = ext.preBidDate || '';\n    bidDate = ext.bidDate || '';\n    location = ext.location || '';\n    trade = ext.trade || '';\n  } catch(e) { aiCallFailed = true; }\n} else {\n  aiCallFailed = true;\n}\n\nconst pId = base.solicitationNumber || '001';\nconst now = new Date().toISOString();\n\n// Fallback: if the AI call itself failed (not just found nothing), a plain\n// regex over the same document text still catches an email if one is\n// visibly present - this is what keeps \"the AI call errored\" from meaning\n// \"we lost the contact info entirely\" for your priority field.\nlet rawDocText = '';\ntry { rawDocText = $('D12. Prepare Text for AI').first().json.text || ''; } catch(e) {}\nif (!contactEmail && rawDocText) {\n  const anyEmail = rawDocText.match(/[\\w.+-]+@[\\w-]+\\.[\\w.]{2,}/);\n  if (anyEmail && !/noreply|webmaster|example\\.com/i.test(anyEmail[0])) contactEmail = anyEmail[0];\n}\n\nreturn [{ json: {\n  \"Project ID\": `${base.agency}-${pId}`,\n  \"Project Name\": base.projectName || 'Construction Bid',\n  \"Agency\": base.agency,\n  \"Project Type\": trade || '',\n  \"Location\": location,\n  \"County\": \"\",\n  \"Project Stage\": \"Open\",\n  \"Estimated Value\": estimatedValue,\n  \"Bid Date\": bidDate,\n  \"Pre-Bid Date\": preBidDate,\n  \"Contractor Type\": \"GC\",\n  \"Trade\": trade,\n  \"Solicitation #\": pId,\n  \"Project URL\": base.url,\n  \"Bid Documents\": base.url,\n  \"Contact Person\": contactName,\n  \"Contact Phone\": contactPhone,\n  \"Contact Email\": contactEmail,\n  \"Submit To Email\": contactEmail,\n  \"Status\": \"Open\",\n  \"Previous Status\": \"\",\n  \"Last Checked\": now,\n  \"Last Updated\": now,\n  \"Change Detected\": \"No\",\n  \"Source\": base.agency,\n  // Honest signal: if the AI call itself failed, flag it instead of\n  // silently writing a mostly-empty row that looks like a real bid.\n  \"isParseError\": aiCallFailed\n} }];\n"
+      }
+    },
+    {
+      "id": "e-fetch-nyscr",
+      "name": "E1. Fetch NYSCR Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        280,
+        1300
+      ],
+      "onError": "continueErrorOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "https://www.nyscr.ny.gov/Ads/Search",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          },
+          "timeout": 20000
+        },
+        "retryOnFail": true,
+        "maxTries": 3,
+        "waitBetweenTries": 3000
+      }
+    },
+    {
+      "id": "e-parse-nyscr",
+      "name": "E2. Parse NYSCR Ads",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        520,
+        1300
+      ],
+      "parameters": {
+        "jsCode": "\n// Confirmed real structure (from a live screenshot): each ad card has a\n// title, then a \"CR#:\" line, then Company/Issue date/Due date/Category/\n// Ad type - same per-card-boundary approach as DASNY, since fields can\n// vary in presence/order between ad types (general ads vs subcontracting\n// opportunity ads look slightly different).\n\nconst raw = $input.first().json.data || $input.first().json.body || '';\n\nconst text = raw\n  .replace(/<script[\\s\\S]*?<\\/script>/gi, '')\n  .replace(/<style[\\s\\S]*?<\\/style>/gi, '')\n  .replace(/<[^>]+>/g, '\\n')\n  .replace(/&nbsp;/g, ' ')\n  .replace(/&amp;/g, '&')\n  .replace(/[ \\t]+/g, ' ')\n  .replace(/\\n\\s*\\n+/g, '\\n')\n  .trim();\n\nconst marker = /CR#:?/gi;\nconst positions = [];\nlet mm;\nwhile ((mm = marker.exec(text)) !== null) positions.push(mm.index);\n\nfunction field(chunk, label) {\n  const m = chunk.match(new RegExp(label + '\\\\s*:?\\\\s*\\\\n?\\\\s*([^\\\\n]+)', 'i'));\n  return m ? m[1].trim() : '';\n}\nconst LABEL_LINE = /^(CR#|Company|Issue date|Due date|Category|Ad type|Title)\\s*:?/i;\n\nconst results = [];\nfor (let i = 0; i < positions.length; i++) {\n  const chunkStart = positions[i];\n  const chunkEnd = i + 1 < positions.length ? positions[i + 1] : text.length;\n  const chunk = text.slice(chunkStart, chunkEnd);\n\n  const crMatch = chunk.match(/CR#:?\\s*([^\\n]+)/i);\n  const crNumber = crMatch ? crMatch[1].trim() : '';\n  if (!crNumber) continue;\n\n  const priorStart = i === 0 ? 0 : positions[i - 1];\n  const beforeLines = text.slice(priorStart, chunkStart).split('\\n').map(l => l.trim()).filter(Boolean);\n  let title = '';\n  for (let li = beforeLines.length - 1; li >= 0; li--) {\n    if (!LABEL_LINE.test(beforeLines[li]) && beforeLines[li].length > 5\n        && !/^This is a/i.test(beforeLines[li])) { title = beforeLines[li]; break; }\n  }\n\n  results.push({\n    json: {\n      _rawSource: 'NYSCR',\n      crNumber,\n      title: title || 'NYSCR Opportunity',\n      company: field(chunk, 'Company'),\n      issueDate: field(chunk, 'Issue date'),\n      dueDate: field(chunk, 'Due date'),\n      category: field(chunk, 'Category'),\n      adType: field(chunk, 'Ad type')\n    }\n  });\n}\n\nreturn results.length ? results : [{\n  json: { _parseFailed: true, _rawSource: 'NYSCR', _note: 'Zero ads parsed - check raw fetch output; the search page may need a query parameter to show results by default.' }\n}];\n"
+      }
+    },
+    {
+      "id": "e-normalize-nyscr",
+      "name": "E3. Normalize NYSCR Row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        760,
+        1300
+      ],
+      "parameters": {
+        "jsCode": "\nconst r = $json;\nif (r._parseFailed) return [{ json: r }];  // preserve the failure signal, don't normalize garbage\n\nconst now = new Date().toISOString();\n\nfunction toIso(dateStr) {\n  if (!dateStr) return '';\n  const d = new Date(dateStr);\n  return isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);\n}\n\nreturn [{\n  json: {\n    \"Project ID\": `CR-${r.crNumber}`,\n    \"Project Name\": r.title || '',\n    \"Agency\": r.company || 'NYS (varies)',\n    \"Project Type\": r.category || '',\n    \"Location\": '',\n    \"County\": '',\n    \"Project Stage\": 'Open',\n    \"Estimated Value\": '',\n    \"Bid Date\": toIso(r.dueDate),\n    \"Pre-Bid Date\": '',\n    \"Contractor Type\": 'GC',\n    \"Trade\": r.category || '',\n    \"Solicitation #\": r.crNumber,\n    \"Project URL\": 'https://www.nyscr.ny.gov/Ads/Search',\n    \"Bid Documents\": '',\n    // Genuinely not available without logging in - not a parsing gap.\n    \"Contact Person\": '', \"Contact Email\": '', \"Submit To Email\": '',\n    \"Status\": 'Open', \"Previous Status\": '',\n    \"Last Checked\": now, \"Last Updated\": now,\n    \"Change Detected\": 'No', \"Source\": 'NYSCR', \"isParseError\": false\n  }\n}];\n"
+      }
+    },
+    {
+      "id": "merge-all",
+      "name": "C1. Merge All Branches",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        1980,
+        400
+      ],
+      "parameters": {
+        "mode": "append",
+        "numberInputs": 5
+      }
+    },
+    {
+      "id": "score-node",
+      "name": "C2. Score Opportunities",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2220,
+        400
+      ],
+      "parameters": {
+        "jsCode": "\nconst TRADE_KEYWORDS = ['ROOFING', 'ELECTRICAL', 'HVAC', 'PLUMBING', 'BOILER', 'MASONRY', 'EXT. WORK', 'GC'];\nconst today = new Date().toISOString().slice(0, 10);\n\nfunction parseMidpoint(rangeStr) {\n  if (!rangeStr) return null;\n  const nums = (rangeStr.match(/[\\d.]+/g) || []).map(Number);\n  const mult = /M/i.test(rangeStr) ? 1_000_000 : (/K/i.test(rangeStr) ? 1_000 : 1);\n  if (nums.length === 2) return ((nums[0] + nums[1]) / 2) * mult;\n  if (nums.length === 1) return nums[0] * mult;\n  return null;\n}\n\nreturn $input.all().map(item => {\n  const row = item.json;\n  if (row.isParseError || row._parseFailed) return { json: { ...row, isParseError: true } };\n\n  let score = 0;\n  if (row['Bid Date']) {\n    const days = Math.floor((new Date(row['Bid Date']) - new Date(today)) / 86400000);\n    if (days >= 0 && days <= 14) score += 25;\n    else if (days <= 30) score += 15;\n    else if (days <= 60) score += 5;\n  }\n  const midpoint = parseMidpoint(row['Estimated Value']);\n  if (midpoint !== null) {\n    if (midpoint >= 5_000_000) score += 25;\n    else if (midpoint >= 1_000_000) score += 15;\n    else score += 5;\n  }\n  if (row['Source'] === 'NYCSCA') score += 20;\n  else if (row['Source'] === 'DASNY') score += 15;\n\n  const haystack = `${row['Trade'] || ''} ${row['Project Name'] || ''}`.toUpperCase();\n  let tradeBonus = 0;\n  for (const kw of TRADE_KEYWORDS) {\n    if (haystack.includes(kw)) tradeBonus = Math.max(tradeBonus, 30);\n  }\n  score += tradeBonus;\n\n  if (row['Contact Email']) score += 10;\n  if (row['Pre-Bid Date']) score += 5;\n\n  return { json: { ...row, \"Opportunity Score\": Math.min(100, score), isParseError: false } };\n});\n"
+      }
+    },
+    {
+      "id": "split-errors",
+      "name": "C3. Split Errors vs Good Rows",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2460,
+        400
+      ],
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.isParseError }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "log-errors",
+      "name": "C4. Log Errors",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        2700,
+        560
+      ],
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "PASTE_YOUR_GOOGLE_SHEET_ID_HERE",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Errors",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "read-existing",
+      "name": "C5. Read Existing Bids",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        2700,
+        260
+      ],
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "PASTE_YOUR_GOOGLE_SHEET_ID_HERE",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Bids",
+          "mode": "name"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "diff-node",
+      "name": "C6. Compare + Set Change Detected",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2940,
+        400
+      ],
+      "parameters": {
+        "jsCode": "\nconst freshRows = $('C3. Split Errors vs Good Rows').all().map(i => i.json);\nconst existingRows = $('C5. Read Existing Bids').all().map(i => i.json);\n\nconst existingById = {};\nfor (const row of existingRows) if (row['Project ID']) existingById[row['Project ID']] = row;\n\nconst KEY_FIELDS = ['Bid Date', 'Estimated Value', 'Status', 'Contact Email'];\n\nreturn freshRows.map(row => {\n  const prior = existingById[row['Project ID']];\n  if (!prior) return { json: { ...row, \"Change Detected\": 'Yes', \"Previous Status\": '' } };\n  const changed = KEY_FIELDS.some(f => String(prior[f] || '') !== String(row[f] || ''));\n  return { json: { ...row, \"Change Detected\": changed ? 'Yes' : 'No',\n    \"Previous Status\": changed ? (prior['Status'] || '') : (prior['Previous Status'] || '') } };\n});\n"
+      }
+    },
+    {
+      "id": "upsert-bids",
+      "name": "C7. Upsert Bids Tab",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        3180,
+        260
+      ],
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "PASTE_YOUR_GOOGLE_SHEET_ID_HERE",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Bids",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "matchingColumns": [
+            "Project ID"
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "merge-runlog",
+      "name": "C8. Merge for Run Log",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        2940,
+        560
+      ],
+      "parameters": {
+        "mode": "append",
+        "numberInputs": 2
+      }
+    },
+    {
+      "id": "build-runlog",
+      "name": "C9. Build Run Log Row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3180,
+        560
+      ],
+      "parameters": {
+        "jsCode": "\nfunction safeAll(nodeName) { try { return $(nodeName).all(); } catch (e) { return []; } }\nconst goodRows = safeAll('C6. Compare + Set Change Detected');\nconst errorRows = safeAll('C4. Log Errors');\n\nconst bySource = {};\nfor (const item of goodRows) { const s = item.json.Source || 'Unknown'; bySource[s] = (bySource[s] || 0) + 1; }\n\nreturn [{ json: {\n  \"Run Time\": new Date().toISOString(),\n  \"Total Rows Written\": goodRows.length,\n  \"Rows Per Source\": JSON.stringify(bySource),\n  \"Parse Errors\": errorRows.length,\n  \"Changed Rows\": goodRows.filter(i => i.json['Change Detected'] === 'Yes').length\n}}];\n"
+      }
+    },
+    {
+      "id": "append-runlog",
+      "name": "C10. Append Run Log",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        3420,
+        560
+      ],
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "PASTE_YOUR_GOOGLE_SHEET_ID_HERE",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Run Log",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "filter-changed",
+      "name": "C11. Filter Change Detected = Yes",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [
+        3420,
+        260
+      ],
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json['Change Detected'] }}",
+              "rightValue": "Yes",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "slack-alert",
+      "name": "C12. OPTIONAL - Slack Alert (enable later)",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        3660,
+        260
+      ],
+      "disabled": true,
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "PASTE_CHANNEL_ID",
+          "mode": "id"
+        },
+        "text": "=New/changed bid: {{ $json['Project Name'] }} ({{ $json['Source'] }}) \u2014 Score {{ $json['Opportunity Score'] }}. {{ $json['Project URL'] }}"
+      }
+    }
+  ],
+  "connections": {
+    "Click to Run": {
+      "main": [
+        [
+          {
+            "node": "A1. Fetch DASNY Listing",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "B1a. Fetch SCA Anticipated Awards",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "B1c. Fetch SCA Active Construction",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "D1. Read Sources from Sheet",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "E1. Fetch NYSCR Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every 6 Hours (Production)": {
+      "main": [
+        [
+          {
+            "node": "A1. Fetch DASNY Listing",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "B1a. Fetch SCA Anticipated Awards",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "B1c. Fetch SCA Active Construction",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "D1. Read Sources from Sheet",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "E1. Fetch NYSCR Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "E1. Fetch NYSCR Search": {
+      "main": [
+        [
+          {
+            "node": "E2. Parse NYSCR Ads",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "E2. Parse NYSCR Ads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "E2. Parse NYSCR Ads": {
+      "main": [
+        [
+          {
+            "node": "E3. Normalize NYSCR Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "E3. Normalize NYSCR Row": {
+      "main": [
+        [
+          {
+            "node": "C1. Merge All Branches",
+            "type": "main",
+            "index": 3
+          }
+        ]
+      ]
+    },
+    "A1. Fetch DASNY Listing": {
+      "main": [
+        [
+          {
+            "node": "A2. Parse Listing Cards",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "A2. Parse Listing Cards",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A2. Parse Listing Cards": {
+      "main": [
+        [
+          {
+            "node": "A3. One Listing at a Time",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A3. One Listing at a Time": {
+      "main": [
+        [
+          {
+            "node": "C1. Merge All Branches",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "A4. Random Delay (Politeness)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A4. Random Delay (Politeness)": {
+      "main": [
+        [
+          {
+            "node": "A5. Fetch Detail Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A5. Fetch Detail Page": {
+      "main": [
+        [
+          {
+            "node": "A6. Parse Contacts + Details",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "A6. Parse Contacts + Details",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A6. Parse Contacts + Details": {
+      "main": [
+        [
+          {
+            "node": "A6b. Has PDF Bid Document?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A6b. Has PDF Bid Document?": {
+      "main": [
+        [
+          {
+            "node": "A6c. Fetch PDF Document",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "A7. Normalize DASNY Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A6c. Fetch PDF Document": {
+      "main": [
+        [
+          {
+            "node": "A6d. Extract PDF Text",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "A7. Normalize DASNY Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A6d. Extract PDF Text": {
+      "main": [
+        [
+          {
+            "node": "A6e. AI Read PDF (Groq - cheap fallback only)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A6e. AI Read PDF (Groq - cheap fallback only)": {
+      "main": [
+        [
+          {
+            "node": "A6f. Merge PDF Data (Fallback Only)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "A6f. Merge PDF Data (Fallback Only)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A6f. Merge PDF Data (Fallback Only)": {
+      "main": [
+        [
+          {
+            "node": "A7. Normalize DASNY Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A7. Normalize DASNY Row": {
+      "main": [
+        [
+          {
+            "node": "A3. One Listing at a Time",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "B1a. Fetch SCA Anticipated Awards": {
+      "main": [
+        [
+          {
+            "node": "B1b. Parse Anticipated Awards",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "B1b. Parse Anticipated Awards",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "B1b. Parse Anticipated Awards": {
+      "main": [
+        [
+          {
+            "node": "C1. Merge All Branches",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "B1c. Fetch SCA Active Construction": {
+      "main": [
+        [
+          {
+            "node": "B1d. Parse SCA Active Construction",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "B1d. Parse SCA Active Construction",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "B1d. Parse SCA Active Construction": {
+      "main": [
+        [
+          {
+            "node": "C1. Merge All Branches",
+            "type": "main",
+            "index": 4
+          }
+        ]
+      ]
+    },
+    "D1. Read Sources from Sheet": {
+      "main": [
+        [
+          {
+            "node": "D2. Keep Only Universal-AI Sources",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "D2. Keep Only Universal-AI Sources": {
+      "main": [
+        [
+          {
+            "node": "D3. Loop Each Website",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "D3. Loop Each Website": {
+      "main": [
+        [
+          {
+            "node": "C1. Merge All Branches",
+            "type": "main",
+            "index": 2
+          }
+        ],
+        [
+          {
+            "node": "D4. Fetch Website/API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "D4. Fetch Website/API": {
+      "main": [
+        [
+          {
+            "node": "D4e. Detect CAPTCHA",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "D4e. Detect CAPTCHA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "D4e. Detect CAPTCHA": {
+      "main": [
+        [
+          {
+            "node": "D4f. CAPTCHA Detected?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "D4f. CAPTCHA Detected?": {
+      "main": [
+        [
+          {
+            "node": "D4g. Log CAPTCHA Event (Human Review)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "D5. Paging Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "D4g. Log CAPTCHA Event (Human Review)": {
+      "main": [
+        [
+          {
+            "node": "D3. Loop Each Website",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "D5. Paging Wait": {
+      "main": [
+        [
+          {
+            "node": "D6a. Pre-Extract Candidate Links",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "D6a. Pre-Extract Candidate Links": {
+      "main": [
+        [
+          {
+            "node": "D6b. AI: Filter Bid Links",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "D6b. AI: Filter Bid Links": {
+      "main": [
+        [
+          {
+            "node": "D7. Parse & Fallback Links",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "D7. Parse & Fallback Links": {
+      "main": [
+        [
+          {
+            "node": "D7b. Has Bids?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "D7b. Has Bids?": {
+      "main": [
+        [
+          {
+            "node": "D8. Loop Specific Bids",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "D3. Loop Each Website",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "D8. Loop Specific Bids": {
+      "main": [
+        [
+          {
+            "node": "D3. Loop Each Website",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "D8b. Rate Limit Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "D8b. Rate Limit Wait": {
+      "main": [
+        [
+          {
+            "node": "D9. Is it a PDF?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "D9. Is it a PDF?": {
+      "main": [
+        [
+          {
+            "node": "D10a. Fetch PDF (Binary)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "D10b. Fetch Detail Page/API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "D10a. Fetch PDF (Binary)": {
+      "main": [
+        [
+          {
+            "node": "D11a. Extract PDF Text",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "D12. Prepare Text for AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "D11a. Extract PDF Text": {
+      "main": [
+        [
+          {
+            "node": "D12. Prepare Text for AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "D10b. Fetch Detail Page/API": {
+      "main": [
+        [
+          {
+            "node": "D10c. Find PDF Links on Detail Page",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "D10c. Find PDF Links on Detail Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "D10c. Find PDF Links on Detail Page": {
+      "main": [
+        [
+          {
+            "node": "D10d. Has Linked PDF?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "D10d. Has Linked PDF?": {
+      "main": [
+        [
+          {
+            "node": "D10e. Fetch Linked PDF (Binary)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "D12. Prepare Text for AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "D10e. Fetch Linked PDF (Binary)": {
+      "main": [
+        [
+          {
+            "node": "D10f. Extract Linked PDF Text",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "D12. Prepare Text for AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "D10f. Extract Linked PDF Text": {
+      "main": [
+        [
+          {
+            "node": "D12. Prepare Text for AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "D12. Prepare Text for AI": {
+      "main": [
+        [
+          {
+            "node": "D13. AI: Extract Deep Details",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "D13. AI: Extract Deep Details": {
+      "main": [
+        [
+          {
+            "node": "D14. Format for Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "D14. Format for Sheets": {
+      "main": [
+        [
+          {
+            "node": "D8. Loop Specific Bids",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "C1. Merge All Branches": {
+      "main": [
+        [
+          {
+            "node": "C2. Score Opportunities",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "C2. Score Opportunities": {
+      "main": [
+        [
+          {
+            "node": "C3. Split Errors vs Good Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "C3. Split Errors vs Good Rows": {
+      "main": [
+        [
+          {
+            "node": "C4. Log Errors",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "C5. Read Existing Bids",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "C5. Read Existing Bids": {
+      "main": [
+        [
+          {
+            "node": "C6. Compare + Set Change Detected",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "C6. Compare + Set Change Detected": {
+      "main": [
+        [
+          {
+            "node": "C7. Upsert Bids Tab",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "C8. Merge for Run Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "C4. Log Errors": {
+      "main": [
+        [
+          {
+            "node": "C8. Merge for Run Log",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "C8. Merge for Run Log": {
+      "main": [
+        [
+          {
+            "node": "C9. Build Run Log Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "C9. Build Run Log Row": {
+      "main": [
+        [
+          {
+            "node": "C10. Append Run Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "C7. Upsert Bids Tab": {
+      "main": [
+        [
+          {
+            "node": "C11. Filter Change Detected = Yes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "C11. Filter Change Detected = Yes": {
+      "main": [
+        [
+          {
+            "node": "C12. OPTIONAL - Slack Alert (enable later)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini Flash (Nav)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "D6b. AI: Filter Bid Links",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini Flash (Read)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "D13. AI: Extract Deep Details",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

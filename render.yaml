@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: sca-factsheet-scraper
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    envVars:
+      - key: GOOGLE_SHEETS_ID
+        sync: false
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: SCRAPE_INTERVAL_HOURS
+        value: "12"
+      - key: RENDERER
+        value: "playwright"
+    healthCheckPath: /health
