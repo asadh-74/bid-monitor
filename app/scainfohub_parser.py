@@ -34,10 +34,12 @@ class ScaBidRow:
 
 def parse_scainfohub_table(html: str, source: str) -> List[ScaBidRow]:
     soup = BeautifulSoup(html, "html.parser")
-    table = soup.find("table")
-    if not table:
+    all_tables = soup.find_all("table")
+    if not all_tables:
         logger.warning("No <table> found on scainfohub %s page - it may not have rendered fully.", source)
         return []
+
+    table = max(all_tables, key=lambda t: len(t.find_all("td")))
 
     rows_out: List[ScaBidRow] = []
     for tr in table.find_all("tr"):

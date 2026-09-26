@@ -41,8 +41,19 @@ def _field(text: str, label: str) -> str:
     return m.group(1).strip() if m else ""
 
 
+FACTSHEET_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    )
+}
+
+
 async def fetch_and_parse_factsheet(pdf_url: str, project_id_hint: str = "") -> Optional[FactsheetData]:
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=30, follow_redirects=True, verify=False, headers=FACTSHEET_HEADERS
+    ) as client:
         try:
             resp = await client.get(pdf_url)
             resp.raise_for_status()
