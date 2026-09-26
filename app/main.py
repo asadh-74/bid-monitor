@@ -22,17 +22,7 @@ SCAINFOHUB_URLS = {
     "limited": "https://scainfohub.azurewebsites.net/limited-bids",
 }
 
-@app.get("/debug/env-check")
-def debug_env_check():
-    import os
-    raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
-    return {
-        "length": len(raw),
-        "first_30": raw[:30],
-        "last_30": raw[-30:],
-        "starts_with_brace": raw.startswith("{"),
-        "ends_with_brace": raw.endswith("}"),
-    }
+
 async def run_factsheet_scrape() -> dict:
     logger.info("Starting factsheet discovery run")
     discovered = await discover_factsheet_pdfs()
