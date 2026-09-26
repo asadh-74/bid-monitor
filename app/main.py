@@ -3,7 +3,7 @@ import logging
 import os
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import FastAPI
+from fastapi import BackgroundTasks, FastAPI
 from fastapi.responses import HTMLResponse
 
 from .pdf_parser import fetch_and_parse_factsheet
@@ -68,9 +68,12 @@ async def run_full_scrape() -> dict:
 
 
 @app.post("/run")
-async def trigger_run():
-    """Runs everything: factsheets + scainfohub bid tables."""
-    return await run_full_scrape()
+async def trigger_run(background_tasks: BackgroundTasks):
+    """Kicks off a full scrape (factsheets + scainfohub) in the background
+    and returns immediately, so slow-running scrapes never trip a proxy's
+    or client's connection/idle timeout while waiting for a response."""
+    background_tasks.add_task(run_full_scrape)
+    return {"status": "started", "message": "Scrape running in background. Check /api/bids shortly for results."}
 
 
 @app.post("/run/factsheets")
