@@ -55,19 +55,19 @@ def parse_dasny_contact(html, url):
     """DASNY staff named in a solicitation are owner contacts, never awarded GCs."""
     soup = BeautifulSoup(html, "html.parser")
     text = soup.get_text(" ", strip=True)
-    # The pre-bid notice usually says "Contact Name, Title ... at email or phone".
-    match = re.search(r"\bContact\s+([A-Z][A-Za-z.' -]{3,65}?),\s*([^\n]{0,180}?)\b([\w.+-]+@dasny\.org)\b", text, re.I)
+    # Keep a named agency contact even if email markup is unavailable to HTTP.
+    match = re.search(r"\bContact\s+([A-Z][A-Za-z.' -]{3,65}?),\s*", text, re.I)
     if not match:
-        # Some notices name designated staff without a pre-bid contact sentence.
-        match = re.search(r"Designated staff for this solicitation is:\s*([A-Z][A-Za-z.' -]{3,65}?),\s*([^\n]{0,180}?)\b([\w.+-]+@dasny\.org)\b", text, re.I)
+        match = re.search(r"Designated staff for this solicitation is:\s*([A-Z][A-Za-z.' -]{3,65}?),\s*", text, re.I)
     if not match:
         return {}
     name = match.group(1).strip()
     if len(name.split()) > 5:
         return {}
-    context = text[match.start():match.end()+50]
+    context = text[match.start():match.end()+220]
+    email = re.search(r"\b[\w.+-]+@dasny\.org\b", context, re.I)
     phone = re.search(r"\(?\d{3}\)?[ -]?\d{3}[ -]?\d{4}", context)
-    return dict(source_contact_name=name, source_contact_email=match.group(3),
+    return dict(source_contact_name=name, source_contact_email=email.group(0) if email else "",
                 source_contact_phone=phone.group(0) if phone else "",
                 source_contact_role="DASNY procurement contact", source_contact_evidence=url)
 
@@ -120,6 +120,7 @@ async def collect_dasny():
                 row.update(parse_dasny_contact(response.text, row["source_url"]))
             except Exception as exc:
                 log.warning("DASNY contact unavailable for %s: %s", row["source_url"], exc)
+    log.info("DASNY contacts found: %d of %d", sum(bool(row.get("source_contact_name")) for row in rows.values()), len(rows))
     return list(rows.values())
 
 
