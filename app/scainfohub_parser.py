@@ -51,7 +51,7 @@ def parse_scainfohub_table(html: str, source: str) -> List[ScaBidRow]:
         phone_email_cell = cells[8] if len(cells) > 8 else ""
 
         phone_match = re.search(r"\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}", phone_email_cell)
-        email_match = re.search(r"[\w.+-]+@[\w-]+\.[\w.]{2,}", phone_email_cell)
+        email_match = re.search(r"[A-Za-z][A-Za-z0-9_.+-]*@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", phone_email_cell)
 
         rows_out.append(ScaBidRow(
             school_description=school_desc,

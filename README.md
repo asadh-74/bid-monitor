@@ -1,88 +1,53 @@
-# SCA Factsheet + Live Bid Scraper (Playwright)
+# Bid Monitor (free Render + Google Sheets)
 
-Real headless-browser rendering for the two NYC SCA sources that a plain
-HTTP fetch can never read: the project factsheet PDFs (linked from a
-JavaScript-templated page) and the Advertised/Limited Bids tables on
-scainfohub.azurewebsites.net.
+The Render app collects public opportunities into one `Projects` tab in the **existing Google Sheet**. The sheet is durable when the free web service sleeps or restarts. `/api/projects` and the dashboard read that tab. n8n owns contact review, AI drafting, Gmail delivery, and writing email status back to the sheet.
 
-## What this replaces in your n8n workflow
+## Sources
 
-n8n's Browserless-based approximation (`D4b`/`D4c`/`D4d`, and the SCA
-Advertised/Limited Bids branches `B2a/B2b/B3a/B3b`, which only ever logged
-"needs Playwright" and never produced real data) are now redundant - this
-service does that job properly, with a real browser, no third-party
-rendering API to configure or pay for. Those nodes should be removed from
-n8n (see the updated workflow file).
+| Collector | Coverage |
+| --- | --- |
+| SCA project factsheets | New Schools and Projects in Construction categories; only project PDFs with confirmed project fields are accepted. Historical occupancy dates are marked `historical`. |
+| SCA advertised and limited bids | scainfohub tables; specialist contact is a procurement contact, **not** a contractor recipient. |
+| DASNY construction contracts | Listings and pagination from the construction contracts source. |
+| NYS Contract Reporter | Paginated open construction notices (up to `NYSCR_MAX_PAGES`, default 40). The optional `NYSCR_AGENCY_FILTER` narrows the agency; blank means statewide construction. |
+| SCA anticipated CIP and capacity contracts | NYC Open Data's official public datasets `tsak-vtv3` and `6m3u-8rbh`. Dates are left blank when the dataset omits them. These are **anticipated**, not awarded. |
+| Construction.com / Dodge | Requires an authorized Dodge project API or licensed data feed; the marketing homepage has no downloadable project listing. |
 
-## Setup
+Each collector fails independently and `/api/status` reports its most recent in-process results. `/health` only checks that FastAPI is up. The current site must be redeployed from this branch before new sources appear; repository code alone does not change the live service.
 
-1. **Google service account** (same one n8n's Google Sheets nodes use, or
-   a new one - either works):
-   - Google Cloud Console → APIs & Services → Credentials → Create service account
-   - Enable the Google Sheets API for the project
-   - Create a JSON key, download it
-   - Share your Google Sheet with the service account's email address (found
-     inside the JSON key) as an Editor
-   - Paste the entire JSON content as the `GOOGLE_SERVICE_ACCOUNT_JSON`
-     environment variable (as one line - most platforms handle multi-line
-     JSON fine in an env var, but if yours doesn't, minify it first)
+## Render configuration
 
-2. **Sheet tabs** - this service creates its own two tabs automatically on
-   first write if they don't exist: `SCA Factsheets` and
-   `SCA Advertised-Limited Bids`. No manual setup needed beyond sharing
-   the sheet with the service account.
+Keep the existing `GOOGLE_SHEETS_ID` and `GOOGLE_SERVICE_ACCOUNT_JSON`. Set a long random `ADMIN_TOKEN` as a Render environment secret. The service account must have Editor access to the sheet. The app creates `Projects` with these columns: Source, Source ID, Source URL, Title, Stage, Deadline, Contractor, Contractor Email, Contact Evidence, Description, First Seen UTC, Last Seen UTC, Email Status, Email Sent UTC, Review Notes. Existing `Bids` and SCA tabs are not modified or deleted.
 
-3. **Local test run:**
-   ```bash
-   pip install -r requirements.txt --break-system-packages
-   playwright install --with-deps chromium
-   export GOOGLE_SHEETS_ID=your_sheet_id
-   export GOOGLE_SERVICE_ACCOUNT_JSON='{"type": "service_account", ...}'
-   uvicorn app.main:app --reload
-   ```
-   Then visit `http://localhost:8000` for the live dashboard, or
-   `curl -X POST http://localhost:8000/run` to trigger a scrape manually.
+A free Render service may sleep between visits; the app starts a collection on wake and repeats it every `SCRAPE_INTERVAL_HOURS` while running. For reliable periodic collection even while it sleeps, schedule an n8n HTTP Request `POST https://bid-monitor.onrender.com/run` with `X-Admin-Token` in n8n's Header Auth credential. The endpoint returns `started` before a run completes; poll `/api/status` for per-source results. Avoid triggering overlapping runs.
 
-## Deploying to Render
+- `GET /` searchable, source-filterable dashboard
+- `GET /api/projects?source=dasny&limit=1000` public feed without private contact columns
+- `GET /api/projects/private` full ledger for n8n, requires `X-Admin-Token`
+- `GET /api/bids` SCA-only compatibility feed with the new schema
+- `GET /api/status` last in-process collector results
+- `POST /run` starts collection, requires `X-Admin-Token`
 
-1. Push this folder to a GitHub repo.
-2. In Render: **New → Blueprint**, point it at the repo (it reads
-   `render.yaml` automatically).
-3. Render will prompt for the two secret env vars (`GOOGLE_SHEETS_ID`,
-   `GOOGLE_SERVICE_ACCOUNT_JSON`) since they're marked `sync: false` -
-   paste them in when asked.
-4. Deploy. Render builds the Docker image (Playwright's official base
-   image, so no manual browser-install step needed) and starts the service.
-5. Your live dashboard is at `https://<your-render-app>.onrender.com/`.
-   Point your actual domain (accuratebidservices.com or a subdomain of it)
-   at this Render service via a CNAME, or have your existing website's
-   frontend fetch `https://<your-render-app>.onrender.com/api/bids`
-   directly and render its own table - whichever fits your site's current
-   setup better.
+## Contractor email with n8n
 
-## Endpoints
+Import [`n8n/contractor_email_workflow.json`](n8n/contractor_email_workflow.json) as a **separate, inactive** workflow. Configure the Header Auth credential (`X-Admin-Token`) on both HTTP nodes, the Gemini credential, and Gmail credential. Replace `REPLACE_WITH_YOUR_COMPANY_AND_OFFERING` in the AI prompt. Test with your own approved test recipient before activating the hourly trigger. Never place the admin token in the workflow JSON or public dashboard.
 
-- `GET /` - the live dashboard (auto-refreshes every 60 seconds)
-- `GET /api/bids` - live JSON: `{ factsheets: [...], advertised_limited_bids: [...] }`
-- `POST /run` - manually trigger a full scrape (both factsheets and scainfohub)
-- `POST /run/factsheets` - factsheets only
-- `POST /run/scainfohub` - scainfohub bid tables only
-- `GET /health` - health check
+Only mark a project `APPROVED` in **Email Status** after you confirm that **Contractor Email** belongs to the named **Contractor**, save the public proof URL in **Contact Evidence**, and review the intended outreach. Do not use the SCA procurement specialist's email as a contractor recipient. The n8n workflow:
 
-By default it also re-scrapes automatically every `SCRAPE_INTERVAL_HOURS`
-(12 by default) - adjust that env var, or set it to `0` and trigger runs
-externally instead (a Render cron job, GitHub Actions schedule, or an n8n
-Schedule Trigger hitting `POST /run` - n8n is still useful as the
-scheduler/glue layer even though it's no longer doing the rendering itself).
+1. Read the `Projects` sheet and take only rows with `Email Status = APPROVED`, a named contractor, a validated contractor email and evidence URL.
+2. Calls `POST /api/outreach/claim` to change one row to `SENDING` **before** calling the AI model or Gmail. If a later node fails, investigate the `SENDING` row manually instead of sending it again blindly.
+3. Ask the AI model for a concise email using only the stored project facts and your company's approved offering. Review the prompt and model output before activating automatic sending.
+4. Sends via the connected Gmail node to the exact approved email, then calls `POST /api/outreach/sent` to set `Email Status = SENT`, `Email Sent UTC` and Gmail message ID. If Gmail succeeded but logging failed, check Sent Mail and resolve the `SENDING` row manually.
 
-## Known limitation, stated plainly
+Your deactivated `DASNY + NYCSCA + Universal AI Fallback v4` workflow should remain off as a **scraper**; a separate n8n workflow can handle scheduling and email delivery. The repository does not include sender credentials or automatically send email. The sheet's recipient and sender credentials must be connected in n8n before activating it.
 
-`scraper.py`'s `CATEGORY_HASHES` list (currently "New-Schools-31" and
-"Projects-in-Construction-37") is the set of category hashes confirmed
-from this project's research so far. If NYCSCA's Projects page has more
-categories than that, they won't be discovered automatically - add their
-hashes to that list. There's no way to enumerate the full category list
-without first rendering the page's top-level navigation, which this
-deliberately does not attempt blindly (matches the whole approach in this
-project: confirm real structure before writing a parser for it, rather
-than guessing at more selectors).
+## Local run
+
+```bash
+pip install -r requirements.txt
+playwright install chromium
+# Set GOOGLE_SHEETS_ID, GOOGLE_SERVICE_ACCOUNT_JSON, and ADMIN_TOKEN
+uvicorn app.main:app --reload
+```
+
+Scraping can fail when a source changes markup or blocks a Render IP. Inspect `/api/status` and Render logs, then update that source parser; do not treat an empty tab as a successful scrape.
