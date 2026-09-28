@@ -1,88 +1,52 @@
-# SCA Factsheet + Live Bid Scraper (Playwright)
+# Bid Monitor
 
-Real headless-browser rendering for the two NYC SCA sources that a plain
-HTTP fetch can never read: the project factsheet PDFs (linked from a
-JavaScript-templated page) and the Advertised/Limited Bids tables on
-scainfohub.azurewebsites.net.
+FastAPI dashboard and scheduled collectors for public construction projects. PostgreSQL is the durable record; Google Sheets is an optional export of the existing SCA feeds.
 
-## What this replaces in your n8n workflow
+## Source coverage
 
-n8n's Browserless-based approximation (`D4b`/`D4c`/`D4d`, and the SCA
-Advertised/Limited Bids branches `B2a/B2b/B3a/B3b`, which only ever logged
-"needs Playwright" and never produced real data) are now redundant - this
-service does that job properly, with a real browser, no third-party
-rendering API to configure or pay for. Those nodes should be removed from
-n8n (see the updated workflow file).
+| Source | Status | Notes |
+| --- | --- | --- |
+| SCA factsheets: New Schools and Projects in Construction | Implemented | Playwright discovers PDFs and extracts project and contractor. |
+| SCA advertised and limited bids | Implemented | scainfohub tables; bid specialist is not a contractor contact. |
+| DASNY construction contracts | Added, requires live Render verification | Parses listings; rejects missing title or solicitation. |
+| NYS Contract Reporter | Partial | Parses the first search results page. Configure `NYSCR_AGENCY_FILTER`; pagination and agency search need validation. |
+| SCA anticipated awards | Experimental | Reports an error if a contract table cannot be verified. |
+| Construction.com | Not integrated | Requires an authorized project feed or API, not its homepage. |
 
-## Setup
+Each collector fails independently. `GET /api/projects` serves the latest 100 records by default, supports `source` and `limit` (maximum 1000), and excludes contact email and evidence. A failed collector does not create guessed data.
 
-1. **Google service account** (same one n8n's Google Sheets nodes use, or
-   a new one - either works):
-   - Google Cloud Console → APIs & Services → Credentials → Create service account
-   - Enable the Google Sheets API for the project
-   - Create a JSON key, download it
-   - Share your Google Sheet with the service account's email address (found
-     inside the JSON key) as an Editor
-   - Paste the entire JSON content as the `GOOGLE_SERVICE_ACCOUNT_JSON`
-     environment variable (as one line - most platforms handle multi-line
-     JSON fine in an env var, but if yours doesn't, minify it first)
+## Render setup
 
-2. **Sheet tabs** - this service creates its own two tabs automatically on
-   first write if they don't exist: `SCA Factsheets` and
-   `SCA Advertised-Limited Bids`. No manual setup needed beyond sharing
-   the sheet with the service account.
+Create a Blueprint from this repository. It provisions a Starter web service and persistent PostgreSQL database. Set `ADMIN_TOKEN` to a long random secret. Optional variables: `NYSCR_AGENCY_FILTER`, `GOOGLE_SHEETS_ID`, `GOOGLE_SERVICE_ACCOUNT_JSON`, `OPENAI_API_KEY`, `OPENAI_MODEL`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `MAIL_FROM`. Keep secrets in Render environment variables. `SCRAPE_INTERVAL_HOURS` defaults to 12; 0 disables automatic runs. The service initializes tables and starts collection on startup.
 
-3. **Local test run:**
-   ```bash
-   pip install -r requirements.txt --break-system-packages
-   playwright install --with-deps chromium
-   export GOOGLE_SHEETS_ID=your_sheet_id
-   export GOOGLE_SERVICE_ACCOUNT_JSON='{"type": "service_account", ...}'
-   uvicorn app.main:app --reload
-   ```
-   Then visit `http://localhost:8000` for the live dashboard, or
-   `curl -X POST http://localhost:8000/run` to trigger a scrape manually.
+- `GET /` dashboard
+- `GET /api/projects?source=dasny&limit=100` unified project feed
+- `GET /api/bids` legacy SCA-only JSON
+- `GET /health` process check (not a freshness guarantee)
+- `POST /run` all collectors, `POST /run/factsheets` and `POST /run/scainfohub` targeted runs; all require `X-Admin-Token`
 
-## Deploying to Render
+A successful deployment and source-specific run are necessary before claiming live coverage. Repository changes alone do not deploy.
 
-1. Push this folder to a GitHub repo.
-2. In Render: **New → Blueprint**, point it at the repo (it reads
-   `render.yaml` automatically).
-3. Render will prompt for the two secret env vars (`GOOGLE_SHEETS_ID`,
-   `GOOGLE_SERVICE_ACCOUNT_JSON`) since they're marked `sync: false` -
-   paste them in when asked.
-4. Deploy. Render builds the Docker image (Playwright's official base
-   image, so no manual browser-install step needed) and starts the service.
-5. Your live dashboard is at `https://<your-render-app>.onrender.com/`.
-   Point your actual domain (accuratebidservices.com or a subdomain of it)
-   at this Render service via a CNAME, or have your existing website's
-   frontend fetch `https://<your-render-app>.onrender.com/api/bids`
-   directly and render its own table - whichever fits your site's current
-   setup better.
+## Contractor outreach
 
-## Endpoints
+Outreach is off by default. A factsheet may name a contractor without giving an email. A bid specialist email belongs to the procurement office and is never used as a contractor recipient.
 
-- `GET /` - the live dashboard (auto-refreshes every 60 seconds)
-- `GET /api/bids` - live JSON: `{ factsheets: [...], advertised_limited_bids: [...] }`
-- `POST /run` - manually trigger a full scrape (both factsheets and scainfohub)
-- `POST /run/factsheets` - factsheets only
-- `POST /run/scainfohub` - scainfohub bid tables only
-- `GET /health` - health check
+1. Manually confirm a public email belongs to the named contractor. Record contractor, email, and public `evidence_url` with `PUT /api/projects/{id}/contact`. The endpoint records your assertion; you must check its evidence.
+2. `POST /api/projects/{id}/draft` creates a draft using `OPENAI_API_KEY` if configured, or a plain template otherwise. It does not send.
+3. `GET /api/outreach` shows recipient and draft for review. `PUT /api/outreach/{id}` edits its subject and body, resetting approval.
+4. `POST /api/outreach/{id}/approve`, then separately `POST /api/outreach/{id}/send`. Delivery requires SMTP credentials. A delivery error is marked `delivery_uncertain` and must be checked manually before retrying.
 
-By default it also re-scrapes automatically every `SCRAPE_INTERVAL_HOURS`
-(12 by default) - adjust that env var, or set it to `0` and trigger runs
-externally instead (a Render cron job, GitHub Actions schedule, or an n8n
-Schedule Trigger hitting `POST /run` - n8n is still useful as the
-scheduler/glue layer even though it's no longer doing the rendering itself).
+All outreach routes require `X-Admin-Token: <ADMIN_TOKEN>`. Never put that token in a public frontend. These are API endpoints; an authenticated review interface remains to be built for easier operator use.
 
-## Known limitation, stated plainly
+## Local development
 
-`scraper.py`'s `CATEGORY_HASHES` list (currently "New-Schools-31" and
-"Projects-in-Construction-37") is the set of category hashes confirmed
-from this project's research so far. If NYCSCA's Projects page has more
-categories than that, they won't be discovered automatically - add their
-hashes to that list. There's no way to enumerate the full category list
-without first rendering the page's top-level navigation, which this
-deliberately does not attempt blindly (matches the whole approach in this
-project: confirm real structure before writing a parser for it, rather
-than guessing at more selectors).
+```bash
+python -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+playwright install chromium
+# Set DATABASE_URL to a local PostgreSQL database and ADMIN_TOKEN to a secret
+uvicorn app.main:app --reload
+```
+
+SQLite may be used for isolated local tests (`DATABASE_URL=sqlite:////tmp/bid-monitor-test.db`). Use PostgreSQL on Render because web-service filesystem data is ephemeral.
