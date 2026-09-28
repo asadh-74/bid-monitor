@@ -12,12 +12,13 @@ HEADERS = ["Source", "Source ID", "Source URL", "Title", "Stage", "Deadline",
            "Contractor", "Contractor Email", "Contact Evidence", "Description",
            "First Seen UTC", "Last Seen UTC", "Email Status", "Email Sent UTC", "Review Notes",
            "Contractor Phone", "Source Contact Name", "Source Contact Email", "Source Contact Phone",
-           "Source Contact Role", "Source Contact Evidence"]
+           "Source Contact Role", "Source Contact Evidence", "Architect/Engineer"]
 KEYS = ["source", "source_id", "source_url", "title", "stage", "deadline", "contractor",
         "contractor_email", "contact_evidence", "description", "first_seen", "last_seen",
         "email_status", "email_sent", "review_notes", "contractor_phone", "source_contact_name",
-        "source_contact_email", "source_contact_phone", "source_contact_role", "source_contact_evidence"]
-LAST_COL = "U"
+        "source_contact_email", "source_contact_phone", "source_contact_role", "source_contact_evidence",
+        "architect_engineer"]
+LAST_COL = "V"
 
 
 def _service():
@@ -35,9 +36,11 @@ def _ensure_tab(service, sheet_id):
     if not header:
         service.spreadsheets().values().update(spreadsheetId=sheet_id, range=f"'{TAB}'!A1:{LAST_COL}1",
             valueInputOption="RAW", body={"values": [HEADERS]}).execute()
-    elif header[0] == HEADERS[:15]:
-        service.spreadsheets().values().update(spreadsheetId=sheet_id, range=f"'{TAB}'!P1:{LAST_COL}1",
-            valueInputOption="RAW", body={"values": [HEADERS[15:]]}).execute()
+    elif header[0] == HEADERS[:15] or header[0] == HEADERS[:21]:
+        start = len(header[0])
+        col = "P" if start == 15 else "V"
+        service.spreadsheets().values().update(spreadsheetId=sheet_id, range=f"'{TAB}'!{col}1:{LAST_COL}1",
+            valueInputOption="RAW", body={"values": [HEADERS[start:]]}).execute()
     elif header[0] != HEADERS:
         raise RuntimeError("Projects tab headers differ from expected schema; refusing to overwrite data")
 
