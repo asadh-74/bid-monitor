@@ -23,7 +23,9 @@ at additional selectors that haven't been confirmed against the live page).
 
 import logging
 import re
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
@@ -92,6 +94,14 @@ def _extract_factsheet_links(html: str, category: str) -> List[DiscoveredFactshe
 
 
 async def discover_factsheet_pdfs() -> List[DiscoveredFactsheet]:
+    # The SCA Angular page often serves literal {{proj.FactSheetUrl}} placeholders
+    # and Chromium exhausts a 512 MB Render instance. Refresh known official PDFs
+    # directly on free instances; validate the actual PDF before storing names.
+    if os.getenv("SCA_BROWSER_DISCOVERY", "0") != "1":
+        path = Path(__file__).with_name("sca_factsheet_urls.txt")
+        return [DiscoveredFactsheet(project_name_hint="", pdf_url=url, category="School Openings")
+                for line in path.read_text().splitlines()
+                if (url := line.strip()) and not url.startswith("#")]
     renderer = get_renderer()
     all_results: List[DiscoveredFactsheet] = []
 
