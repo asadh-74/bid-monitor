@@ -10,10 +10,14 @@ log = logging.getLogger(__name__)
 TAB = "Projects"
 HEADERS = ["Source", "Source ID", "Source URL", "Title", "Stage", "Deadline",
            "Contractor", "Contractor Email", "Contact Evidence", "Description",
-           "First Seen UTC", "Last Seen UTC", "Email Status", "Email Sent UTC", "Review Notes"]
+           "First Seen UTC", "Last Seen UTC", "Email Status", "Email Sent UTC", "Review Notes",
+           "Contractor Phone", "Source Contact Name", "Source Contact Email", "Source Contact Phone",
+           "Source Contact Role", "Source Contact Evidence"]
 KEYS = ["source", "source_id", "source_url", "title", "stage", "deadline", "contractor",
         "contractor_email", "contact_evidence", "description", "first_seen", "last_seen",
-        "email_status", "email_sent", "review_notes"]
+        "email_status", "email_sent", "review_notes", "contractor_phone", "source_contact_name",
+        "source_contact_email", "source_contact_phone", "source_contact_role", "source_contact_evidence"]
+LAST_COL = "U"
 
 
 def _service():
@@ -27,17 +31,20 @@ def _ensure_tab(service, sheet_id):
     if TAB not in [s["properties"]["title"] for s in meta.get("sheets", [])]:
         service.spreadsheets().batchUpdate(spreadsheetId=sheet_id,
             body={"requests": [{"addSheet": {"properties": {"title": TAB}}}]}).execute()
-    header = service.spreadsheets().values().get(spreadsheetId=sheet_id, range=f"'{TAB}'!A1:O1").execute().get("values", [])
+    header = service.spreadsheets().values().get(spreadsheetId=sheet_id, range=f"'{TAB}'!A1:{LAST_COL}1").execute().get("values", [])
     if not header:
-        service.spreadsheets().values().update(spreadsheetId=sheet_id, range=f"'{TAB}'!A1:O1",
+        service.spreadsheets().values().update(spreadsheetId=sheet_id, range=f"'{TAB}'!A1:{LAST_COL}1",
             valueInputOption="RAW", body={"values": [HEADERS]}).execute()
+    elif header[0] == HEADERS[:15]:
+        service.spreadsheets().values().update(spreadsheetId=sheet_id, range=f"'{TAB}'!P1:{LAST_COL}1",
+            valueInputOption="RAW", body={"values": [HEADERS[15:]]}).execute()
     elif header[0] != HEADERS:
         raise RuntimeError("Projects tab headers differ from expected schema; refusing to overwrite data")
 
 
 def _rows(service, sheet_id):
     values = service.spreadsheets().values().get(spreadsheetId=sheet_id,
-        range=f"'{TAB}'!A2:O10000").execute().get("values", [])
+        range=f"'{TAB}'!A2:{LAST_COL}10000").execute().get("values", [])
     return [dict(zip(KEYS, row + [""] * (len(KEYS) - len(row)))) for row in values]
 
 
@@ -47,7 +54,7 @@ def read_projects(private=False):
     rows = _rows(service, sheet_id)
     if private:
         return rows
-    return [{k: v for k, v in row.items() if k not in ("contractor_email", "contact_evidence", "review_notes")}
+    return [{k: v for k, v in row.items() if k not in ("review_notes",)}
             for row in rows]
 
 
@@ -66,21 +73,21 @@ def upsert_projects(items):
         key = (item["source"], item["source_id"])
         position, previous = index.get(key, (None, {}))
         record = {k: previous.get(k, "") for k in KEYS}
-        for key_name in KEYS[:10]:
+        for key_name in KEYS[:10] + KEYS[15:]:
             if item.get(key_name):
                 record[key_name] = str(item[key_name])
         record["first_seen"] = record["first_seen"] or now
         record["last_seen"] = now
         values = [record[k] for k in KEYS]
         if position:
-            updates.append({"range": f"'{TAB}'!A{position}:O{position}", "values": [values]})
+            updates.append({"range": f"'{TAB}'!A{position}:{LAST_COL}{position}", "values": [values]})
         else:
             additions.append(values)
     if updates:
         service.spreadsheets().values().batchUpdate(spreadsheetId=sheet_id,
             body={"valueInputOption": "RAW", "data": updates}).execute()
     if additions:
-        service.spreadsheets().values().append(spreadsheetId=sheet_id, range=f"'{TAB}'!A:O",
+        service.spreadsheets().values().append(spreadsheetId=sheet_id, range=f"'{TAB}'!A:{LAST_COL}",
             valueInputOption="RAW", insertDataOption="INSERT_ROWS", body={"values": additions}).execute()
     log.info("Project ledger: %d updates, %d additions", len(updates), len(additions))
     return len(items)
