@@ -1,6 +1,7 @@
 """Public procurement result pages; parse only fields actually present in source markup."""
 import logging
 import re
+import asyncio
 from urllib.parse import urljoin
 
 import httpx
@@ -86,16 +87,26 @@ async def collect_dasny():
 
 
 async def collect_nyscr():
-    # The public initial page has a paginated result set. Configure a specific
-    # agency to prevent unrelated statewide notices being imported as SCA work.
     import os
     agency = os.getenv("NYSCR_AGENCY_FILTER", "")
-    if not agency:
-        raise ValueError("Set NYSCR_AGENCY_FILTER to an agency name before enabling this collector")
+    max_pages = min(max(int(os.getenv("NYSCR_MAX_PAGES", "40")), 1), 100)
+    collected = {}
     async with httpx.AsyncClient(timeout=45, follow_redirects=True) as client:
-        response = await client.get(NYSCR)
-        response.raise_for_status()
-    return parse_nyscr(response.text, agency_filter=agency)
+        for page in range(max_pages):
+            response = await client.get(NYSCR, params={"Skip": page * 25, "Status": "Open"})
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, "html.parser")
+            cards = soup.select(".opp-list-item[data-ad-id]")
+            if not cards:
+                break
+            for row in parse_nyscr(response.text, agency_filter=agency):
+                collected[row["source_id"]] = row
+            if len(cards) < 25:
+                break
+            await asyncio.sleep(0.5)
+        else:
+            log.warning("NYSCR reached NYSCR_MAX_PAGES=%d; coverage may be incomplete", max_pages)
+    return list(collected.values())
 
 
 async def collect_awards():

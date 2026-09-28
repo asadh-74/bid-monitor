@@ -9,7 +9,7 @@ FastAPI dashboard and scheduled collectors for public construction projects. Pos
 | SCA factsheets: New Schools and Projects in Construction | Implemented | Playwright discovers PDFs and extracts project and contractor. |
 | SCA advertised and limited bids | Implemented | scainfohub tables; bid specialist is not a contractor contact. |
 | DASNY construction contracts | Added, requires live Render verification | Parses listings; rejects missing title or solicitation. |
-| NYS Contract Reporter | Partial | Parses the first search results page. Configure `NYSCR_AGENCY_FILTER`; pagination and agency search need validation. |
+| NYS Contract Reporter | Added, requires live Render verification | Pages through open notices (default cap 40 pages), keeping construction categories. Optional `NYSCR_AGENCY_FILTER` narrows by exact agency text. This is statewide data unless filtered. |
 | SCA anticipated awards | Experimental | Reports an error if a contract table cannot be verified. |
 | Construction.com | Not integrated | Requires an authorized project feed or API, not its homepage. |
 
@@ -17,7 +17,7 @@ Each collector fails independently. `GET /api/projects` serves the latest 100 re
 
 ## Render setup
 
-Create a Blueprint from this repository. It provisions a Starter web service and persistent PostgreSQL database. Set `ADMIN_TOKEN` to a long random secret. Optional variables: `NYSCR_AGENCY_FILTER`, `GOOGLE_SHEETS_ID`, `GOOGLE_SERVICE_ACCOUNT_JSON`, `OPENAI_API_KEY`, `OPENAI_MODEL`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `MAIL_FROM`. Keep secrets in Render environment variables. `SCRAPE_INTERVAL_HOURS` defaults to 12; 0 disables automatic runs. The service initializes tables and starts collection on startup.
+Create a Blueprint from this repository. It provisions a Starter web service and persistent PostgreSQL database. Set `ADMIN_TOKEN` to a long random secret. Optional variables: `NYSCR_AGENCY_FILTER`, `NYSCR_MAX_PAGES`, `GOOGLE_SHEETS_ID`, `GOOGLE_SERVICE_ACCOUNT_JSON`, `OPENAI_API_KEY`, `OPENAI_MODEL`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `MAIL_FROM`. Keep secrets in Render environment variables. `SCRAPE_INTERVAL_HOURS` defaults to 12; 0 disables automatic runs. The service initializes tables and starts collection on startup.
 
 - `GET /` dashboard
 - `GET /api/projects?source=dasny&limit=100` unified project feed
