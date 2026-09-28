@@ -1,0 +1,23 @@
+# Public SCA PDF URLs from project listings; each PDF is fetched and validated before storage.
+https://www.nycsca.org/Portals/0/App_Resources/Projects/School Openings/2019/K032 addition Factsheet.pdf?ver=-EeHyLn8oIYa8aMu6E-yIA%3d%3d
+https://www.nycsca.org/Portals/0/App_Resources/Projects/School Openings/2019/K667 Factsheet-8-12-2020.pdf?ver=iZbrSUcZJLmzp3wYdqcjsg%3d%3d
+https://www.nycsca.org/Portals/0/App_Resources/Projects/School Openings/2019/K746 Factsheet (1).pdf?ver=m2WMZqjQw68-wag8euiP2A%3d%3d
+https://www.nycsca.org/Portals/0/App_Resources/Projects/School Openings/2019/Q361 Factsheet.pdf?ver=ZGsQZ6UVxXOaU1L7Qip_jw%3d%3d
+https://www.nycsca.org/Portals/0/App_Resources/Projects/School Openings/K004 Factsheets 2026.pdf?ver=KdduOJZdCZVtkRLbluy5Xg%3d%3d
+https://www.nycsca.org/Portals/0/App_Resources/Projects/School Openings/K127 Addition Factsheet The McKinley Park School.pdf?ver=JfzBpDVs68HTIOvjQJ1Wig%3d%3d
+https://www.nycsca.org/Portals/0/App_Resources/Projects/School Openings/K206 Factsheets 2026.pdf?ver=X_jiqTOUFtjouzfX88CP_w%3d%3d
+https://www.nycsca.org/Portals/0/App_Resources/Projects/School Openings/K280 Factsheets 2026.pdf?ver=N5jXwVUg7J1CcXP6mUlALQ%3d%3d
+https://www.nycsca.org/Portals/0/App_Resources/Projects/School Openings/K358 Factsheets 2026.pdf?ver=vCFP2Tc6Rm4bV6MeZz5IrQ%3d%3d
+https://www.nycsca.org/Portals/0/App_Resources/Projects/School Openings/K599 - ENYFA Factsheet.pdf?ver=wYG5TtTUMJu4zRrbZxxiSw%3d%3d
+https://www.nycsca.org/Portals/0/App_Resources/Projects/School Openings/M634 Factsheets 2026.pdf?ver=Ncv7ZWwyeY_7Ugo0nzyVsg%3d%3d
+https://www.nycsca.org/Portals/0/App_Resources/Projects/School Openings/Q002 Addition Factsheet.pdf?ver=16Vy4E-KhCEVO-OaRwIChA%3d%3d
+https://www.nycsca.org/Portals/0/App_Resources/Projects/School Openings/Q095 Factsheets 2026.pdf?ver=_dmULqD7j08FVyjK9ezJhg%3d%3d
+https://www.nycsca.org/Portals/0/App_Resources/Projects/School Openings/Q116 Factsheets 2026.pdf?ver=wJsnwjwhmq4-BsgKrET69A%3d%3d
+https://www.nycsca.org/Portals/0/App_Resources/Projects/School Openings/Q216 Factsheets 2026.pdf?ver=Emi9Z9rmmlZaKfneUbeiZA%3d%3d
+https://www.nycsca.org/Portals/0/App_Resources/Projects/School Openings/Q256 factsheet Final.pdf?ver=UaWfCp1oyh56PQgcywZZ3Q%3d%3d
+https://www.nycsca.org/Portals/0/App_Resources/Projects/School Openings/Q340 Factsheets 2026.pdf?ver=2l3wY1CAqCOekLbvbtE1nw%3d%3d
+https://www.nycsca.org/Portals/0/App_Resources/Projects/School Openings/Q375 Factsheet.pdf?ver=mBBmIiIvATKOXkwMlW0deQ%3d%3d
+https://www.nycsca.org/Portals/0/App_Resources/Projects/School Openings/Q497 Factsheets 2026.pdf?ver=JL1IjWG4PskvGYzuQcdJ0Q%3d%3d
+https://www.nycsca.org/Portals/0/App_Resources/Projects/School Openings/X033 Annex Factsheet.pdf?ver=F-7qQcsw0j1uFvGpF53ncg%3d%3d
+https://www.nycsca.org/Portals/0/App_Resources/Projects/School Openings/X340 Annex Factsheet.pdf?ver=68yCuBkgQhverHjeQTpz8g%3d%3d
+https://www.nycsca.org/Portals/0/App_Resources/Projects/School Openings/X97 Addition Factsheet.pdf?ver=2cjTln56GezdGHvftVoAIw%3d%3d
