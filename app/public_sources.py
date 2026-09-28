@@ -54,6 +54,26 @@ def parse_dasny(html):
 def parse_dasny_contact(html, url):
     """DASNY staff named in a solicitation are owner contacts, never awarded GCs."""
     soup = BeautifulSoup(html, "html.parser")
+    panel = soup.select_one("#rfp-contacts")
+    if panel:
+        heading = next((h for h in panel.find_all("h2")
+                        if h.get_text(" ", strip=True).lower() == "primary contact"), None)
+        if heading:
+            fields = []
+            for sibling in heading.next_siblings:
+                if getattr(sibling, "name", None) == "h2":
+                    break
+                if getattr(sibling, "name", None) == "p":
+                    fields.append(sibling.get_text(" ", strip=True))
+            if fields and 2 <= len(fields[0].split()) <= 5:
+                details = " ".join(fields)
+                email = re.search(r"\b[\w.+-]+@dasny\.org\b", details, re.I)
+                phone = re.search(r"\(?\d{3}\)?[ -]?\d{3}[ -]?\d{4}", details)
+                return dict(source_contact_name=fields[0],
+                            source_contact_email=email.group(0) if email else "",
+                            source_contact_phone=phone.group(0) if phone else "",
+                            source_contact_role=fields[1] if len(fields) > 1 else "DASNY primary contact",
+                            source_contact_evidence=url)
     text = soup.get_text(" ", strip=True)
     # Keep a named agency contact even if email markup is unavailable to HTTP.
     # Some notices say "Contact Brian Francis at ..." without a comma.
