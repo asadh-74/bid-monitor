@@ -3,23 +3,18 @@ services:
     name: sca-factsheet-scraper
     env: docker
     dockerfilePath: ./Dockerfile
-    plan: starter
+    plan: free
     envVars:
-      - key: DATABASE_URL
-        fromDatabase:
-          name: bid-monitor-db
-          property: connectionString
-      - key: ADMIN_TOKEN
-        sync: false
       - key: GOOGLE_SHEETS_ID
         sync: false
       - key: GOOGLE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: ADMIN_TOKEN
         sync: false
       - key: SCRAPE_INTERVAL_HOURS
         value: "12"
       - key: RENDERER
         value: "playwright"
+      - key: NYSCR_MAX_PAGES
+        value: "40"
     healthCheckPath: /health
-databases:
-  - name: bid-monitor-db
-    plan: basic-256mb

@@ -52,7 +52,7 @@ FACTSHEET_HEADERS = {
 
 async def fetch_and_parse_factsheet(pdf_url: str, project_id_hint: str = "") -> Optional[FactsheetData]:
     async with httpx.AsyncClient(
-        timeout=30, follow_redirects=True, verify=False, headers=FACTSHEET_HEADERS
+        timeout=30, follow_redirects=True, headers=FACTSHEET_HEADERS
     ) as client:
         try:
             resp = await client.get(pdf_url)
@@ -73,9 +73,19 @@ async def fetch_and_parse_factsheet(pdf_url: str, project_id_hint: str = "") -> 
         logger.warning("No extractable text in %s - may be a scanned image PDF", pdf_url)
         return None
 
+    # A project code alone is insufficient: unrelated PDFs on the page contain
+    # incidental school codes and previously polluted the live factsheet table.
+    if not all(re.search(rf"\b{label}\b\s*:", text, re.I)
+               for label in ("Project Type", "Location", "General Contractor")):
+        logger.warning("Skipping non-project PDF %s", pdf_url)
+        return None
+
     # The project code (e.g. "K206") and full title appear together near the
     # top, e.g. "K206 JOSEPH F. LAMB" - split the leading code off the title.
-    title_match = re.search(r"\b([A-Z]\d{3,4})\b\s*(.*)", text)
+    title_match = re.search(r"\b([KMQXR]\d{3,4})\b\s*([^\n]*)", text)
+    if not title_match:
+        logger.warning("Skipping factsheet without a school project code: %s", pdf_url)
+        return None
     project_id = title_match.group(1) if title_match else project_id_hint
     project_name = (title_match.group(0).strip() if title_match else text.strip().split("\n", 1)[0])
 

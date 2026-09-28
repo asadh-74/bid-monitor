@@ -12,7 +12,9 @@ from .renderer import get_renderer
 log = logging.getLogger(__name__)
 DASNY = "https://www.dasny.org/opportunities/rfps-bids/construction-contracts"
 NYSCR = "https://www.nyscr.ny.gov/Ads/Search"
-AWARDS = "https://nycsca.org/Doing-Business/Contracting-with-Us/Capital-Improvements-Anticipated-Contract-Awards"
+AWARDS = "https://www.nycsca.org/Doing-Business/Contracting-with-Us/Capital-Improvements-Anticipated-Contract-Awards"
+SCA_CIP_DATA = "https://data.cityofnewyork.us/resource/tsak-vtv3.json"
+SCA_CAP_DATA = "https://data.cityofnewyork.us/resource/6m3u-8rbh.json"
 
 
 def _label(text, name):
@@ -32,11 +34,9 @@ def parse_dasny(html):
             continue
         seen.add(url)
         # Each result has its own heading and detail link. Avoid neighboring records.
-        block = link
-        for parent in link.parents:
-            if parent.name in ("article", "li") or (parent.name == "div" and parent.find(re.compile("^h[2-5]$")) and "Solicitation" in parent.get_text(" ", strip=True)):
-                block = parent
-                break
+        block = link.find_parent("div", class_="rfp-bid-wrapper")
+        if not block:
+            continue
         text = block.get_text("\n", strip=True)
         heading = block.find(re.compile("^h[2-5]$"))
         title = heading.get_text(" ", strip=True) if heading else ""
@@ -79,11 +79,19 @@ def parse_nyscr(html, agency_filter="", construction_only=True):
 
 
 async def collect_dasny():
-    html = await get_renderer().render(DASNY, wait_seconds=3)
-    rows = parse_dasny(html)
+    renderer = get_renderer()
+    rows = {}
+    for page in range(20):
+        url = DASNY if page == 0 else f"{DASNY}?page={page}"
+        html = await renderer.render(url, wait_seconds=3)
+        parsed = parse_dasny(html)
+        for row in parsed:
+            rows[row["source_id"]] = row
+        if not parsed or not BeautifulSoup(html, "html.parser").select_one('a[rel="next"], a[title="Go to next page"]'):
+            break
     if not rows:
         raise ValueError("DASNY returned no valid opportunity records; check page structure")
-    return rows
+    return list(rows.values())
 
 
 async def collect_nyscr():
@@ -110,23 +118,27 @@ async def collect_nyscr():
 
 
 async def collect_awards():
-    html = await get_renderer().render(AWARDS, wait_seconds=4)
-    soup = BeautifulSoup(html, "html.parser")
+    """Official NYC Open Data exports of upcoming SCA CIP and capacity contracts."""
     rows = []
-    for table in soup.find_all("table"):
-        headings = [x.get_text(" ", strip=True).lower() for x in table.select("tr:first-child th")]
-        if not headings or not any("contract" in h or "project" in h for h in headings):
-            continue
-        for tr in table.select("tr"):
-            cells = [x.get_text(" ", strip=True) for x in tr.find_all("td")]
-            if len(cells) != len(headings):
-                continue
-            fields = dict(zip(headings, cells))
-            title = next((v for k, v in fields.items() if "project" in k or "description" in k), "")
-            key = next((v for k, v in fields.items() if "contract" in k and ("number" in k or "no" in k)), "")
-            if title and key:
-                rows.append(dict(source="sca_awards", source_id=key, source_url=AWARDS, title=title,
-                                 stage="anticipated_award", description="; ".join(f"{k}: {v}" for k, v in fields.items())))
+    async with httpx.AsyncClient(timeout=45, follow_redirects=True) as client:
+        for kind, url in (("sca_cip_upcoming", SCA_CIP_DATA), ("sca_capacity_upcoming", SCA_CAP_DATA)):
+            response = await client.get(url, params={"$limit": 5000})
+            response.raise_for_status()
+            for item in response.json():
+                title = item.get("upcoming_project_name", "")
+                scope = item.get("upcoming_project_description", "")
+                design = item.get("upcoming_project_design_number", "")
+                if not title or not scope:
+                    continue
+                identity = f"{design or title}|{scope}|{item.get('upcoming_project_borough_', '')}"
+                rows.append(dict(source=kind, source_id=identity, source_url=url,
+                                 title=f"{title} — {scope}", stage="anticipated",
+                                 deadline=item.get("upcoming_project_advertised_date", "") or
+                                          item.get("upcoming_project_projected_advertisement_date", ""),
+                                 description=f"Category: {item.get('upcoming_project_category','')}; "
+                                             f"Status: {item.get('upcoming_project_status_','')}; "
+                                             f"Borough: {item.get('upcoming_project_borough_','')}; "
+                                             f"Budget: {item.get('upcoming_project_budget_range','')}"))
     if not rows:
-        raise ValueError("SCA awards page has no verified contract table; selector needs inspection")
+        raise ValueError("NYC Open Data returned no upcoming SCA contracts")
     return rows

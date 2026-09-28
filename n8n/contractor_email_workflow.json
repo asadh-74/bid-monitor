@@ -1,0 +1,253 @@
+{
+  "name": "Bid Monitor - Reviewed Contractor Outreach",
+  "nodes": [
+    {
+      "id": "manual",
+      "name": "Manual Test",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        120
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "schedule",
+      "name": "Hourly Check",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        320
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "claim",
+      "name": "Claim Approved Project",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        240,
+        220
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://bid-monitor.onrender.com/api/outreach/claim",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      }
+    },
+    {
+      "id": "only",
+      "name": "Only Approved Contact",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        220
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "return $input.all().filter(item => item.json.project && item.json.project.email_status === 'SENDING' && item.json.project.contractor_email && item.json.project.contact_evidence);"
+      }
+    },
+    {
+      "id": "ai",
+      "name": "AI Draft Contractor Email",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.6,
+      "position": [
+        720,
+        220
+      ],
+      "parameters": {
+        "promptType": "define",
+        "text": "=Write a short, professional first-contact email to the verified contractor. Return ONLY JSON with keys subject and body. Use only these project facts: {{ JSON.stringify($json.project) }}. Our company and offering: REPLACE_WITH_YOUR_COMPANY_AND_OFFERING. Do not claim a prior relationship, bid award, partnership, or capabilities not explicitly supplied. Ask if they would be open to discussing this project. Do not invent a different recipient, email, bid date, or contact person.",
+        "options": {
+          "systemMessage": "You draft accurate B2B outreach using only provided facts. Return valid JSON, no Markdown."
+        }
+      }
+    },
+    {
+      "id": "model",
+      "name": "Gemini for Draft",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [
+        720,
+        440
+      ],
+      "parameters": {
+        "model": "gemini-3.1-flash-lite",
+        "options": {
+          "temperature": 0.2
+        }
+      }
+    },
+    {
+      "id": "draft",
+      "name": "Validate Draft",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        220
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const p = $('Only Approved Contact').item.json.project; let raw = $json.output || ''; let d; try { d = JSON.parse(raw); } catch(e) { throw new Error('AI output was not valid JSON; row remains SENDING for review'); } if (!d.subject || !d.body || !p.contractor_email || !p.contact_evidence || !p.row_number) throw new Error('Missing draft or verified contact; row remains SENDING'); if (d.subject.includes('REPLACE_WITH') || d.body.includes('REPLACE_WITH')) throw new Error('Configure company offering before sending'); return {json:{subject:d.subject,body:d.body,recipient:p.contractor_email,row_number:p.row_number,source:p.source,source_id:p.source_id}};"
+      }
+    },
+    {
+      "id": "gmail",
+      "name": "Send Contractor Email",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1200,
+        220
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $json.recipient }}",
+        "subject": "={{ $json.subject }}",
+        "emailType": "text",
+        "message": "={{ $json.body }}",
+        "options": {
+          "appendAttribution": false
+        }
+      }
+    },
+    {
+      "id": "sent",
+      "name": "Log Sent Message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1440,
+        220
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://bid-monitor.onrender.com/api/outreach/sent",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({row_number: $('Validate Draft').item.json.row_number, source: $('Validate Draft').item.json.source, source_id: $('Validate Draft').item.json.source_id, recipient: $('Validate Draft').item.json.recipient, message_id: $json.id}) }}",
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Manual Test": {
+      "main": [
+        [
+          {
+            "node": "Claim Approved Project",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hourly Check": {
+      "main": [
+        [
+          {
+            "node": "Claim Approved Project",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim Approved Project": {
+      "main": [
+        [
+          {
+            "node": "Only Approved Contact",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Only Approved Contact": {
+      "main": [
+        [
+          {
+            "node": "AI Draft Contractor Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini for Draft": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Draft Contractor Email",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Draft Contractor Email": {
+      "main": [
+        [
+          {
+            "node": "Validate Draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Draft": {
+      "main": [
+        [
+          {
+            "node": "Send Contractor Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Contractor Email": {
+      "main": [
+        [
+          {
+            "node": "Log Sent Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}

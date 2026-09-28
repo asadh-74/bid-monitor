@@ -59,6 +59,14 @@ def _extract_factsheet_links(html: str, category: str) -> List[DiscoveredFactshe
         if ".pdf" not in href.lower():
             continue
         full_url = urljoin(BASE_URL, href)
+        # Only SCA project factsheets. The page also links to safety manuals,
+        # general conditions, design events and public-art PDFs.
+        path = full_url.split("?", 1)[0].lower()
+        filename = path.rsplit("/", 1)[-1]
+        if "/app_resources/projects/" not in path or "artwork" in filename or "public art" in filename:
+            continue
+        if not re.search(r"(?:^|[^a-z0-9])[kmqxr]\s*\d{2,4}(?:[^a-z0-9]|$)", filename, re.I):
+            continue
         if full_url in seen_urls:
             continue
         seen_urls.add(full_url)

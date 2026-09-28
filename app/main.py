@@ -1,281 +1,155 @@
+"""Free-tier bid monitor: source collectors -> one Google Sheet -> dashboard/n8n."""
 import asyncio
 import logging
 import os
+import secrets
+from datetime import datetime, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse
 
 from .pdf_parser import fetch_and_parse_factsheet
+from .project_store import claim_approved_contact, mark_sent, read_projects, upsert_projects
+from .public_sources import collect_awards, collect_dasny, collect_nyscr
 from .renderer import get_renderer
 from .scainfohub_parser import parse_scainfohub_table
 from .scraper import discover_factsheet_pdfs
-from .sheets_writer import read_all_live_data, write_factsheets, write_sca_bids
-from .public_sources import collect_awards, collect_dasny, collect_nyscr
-from .store import Outreach, Project, as_dict, init_db, session, upsert_projects
-from .outreach import draft_for, send_approved
-from sqlalchemy import select
 from pydantic import BaseModel
-import secrets
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-logger = logging.getLogger("sca-scraper")
-
-app = FastAPI(title="SCA Factsheet + Bids Scraper")
-
+log = logging.getLogger("bid-monitor")
+app = FastAPI(title="Bid Monitor")
+run_lock = asyncio.Lock()
+outreach_lock = asyncio.Lock()
+last_run = {}
 SCAINFOHUB_URLS = {
     "advertised": "https://scainfohub.azurewebsites.net/advertised-bids",
     "limited": "https://scainfohub.azurewebsites.net/limited-bids",
 }
 
 
-async def run_factsheet_scrape() -> dict:
-    logger.info("Starting factsheet discovery run")
+def require_admin(x_admin_token: str | None = Header(default=None)):
+    token = os.getenv("ADMIN_TOKEN")
+    if not token or not x_admin_token or not secrets.compare_digest(token, x_admin_token):
+        raise HTTPException(401, "Admin token required")
+
+
+async def run_factsheets():
     discovered = await discover_factsheet_pdfs()
-    logger.info("Discovered %d factsheet PDF links total", len(discovered))
+    items = []
+    for found in discovered:
+        data = await fetch_and_parse_factsheet(found.pdf_url, project_id_hint=found.project_name_hint)
+        if data:
+            stage = "in_construction"
+            try:
+                occupancy = datetime.strptime(data.occupancy_date.strip(), "%B %Y").replace(tzinfo=timezone.utc)
+                if occupancy < datetime.now(timezone.utc):
+                    stage = "historical"
+            except ValueError:
+                stage = "unknown"
+            items.append(dict(source="sca_factsheet", source_id=data.project_id,
+                              source_url=data.source_pdf_url, title=data.project_name,
+                              stage=stage, contractor=data.general_contractor,
+                              description=f"Type: {data.project_type}; Location: {data.location}; Category: {found.category}"))
+        await asyncio.sleep(0.5)
+    return {"discovered": len(discovered), "valid": len(items), "stored": upsert_projects(items)}
 
-    results, failures = [], []
-    for item in discovered:
-        data = await fetch_and_parse_factsheet(item.pdf_url, project_id_hint=item.project_name_hint)
-        (results if data else failures).append(data or item.pdf_url)
-        await asyncio.sleep(1.0)  # be polite to the PDF host
 
-    upsert_projects([dict(source="sca_factsheet", source_id=r.project_id or r.source_pdf_url,
-                          source_url=r.source_pdf_url, title=r.project_name, stage="in_construction",
-                          contractor=r.general_contractor, description=f"Type: {r.project_type}; Location: {r.location}")
-                     for r in results if r])
-    if os.getenv("GOOGLE_SHEETS_ID") and os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON"):
-        try:
-            write_factsheets([r for r in results if r])
-        except Exception:
-            logger.exception("Optional Sheets export failed")
-    return {"discovered": len(discovered), "parsed": len(results), "failed": len(failures)}
-
-
-async def run_scainfohub_scrape() -> dict:
-    logger.info("Starting scainfohub bid tables scrape")
+async def run_scainfohub():
     renderer = get_renderer()
-    all_rows = []
-    per_source = {}
-
-    for source, url in SCAINFOHUB_URLS.items():
-        try:
-            html = await renderer.render(url, wait_seconds=4.0)
-        except Exception as e:
-            logger.error("Failed to render %s: %s", url, e)
-            per_source[source] = 0
-            continue
-        rows = parse_scainfohub_table(html, source=source)
-        per_source[source] = len(rows)
-        all_rows.extend(rows)
-
-    upsert_projects([dict(source=f"sca_{r.source}", source_id=r.solicitation_number,
-                          source_url=SCAINFOHUB_URLS[r.source], title=r.school_description,
-                          stage="advertised", deadline=r.bid_open_date, description=f"Contract type: {r.contract_type}")
-                     for r in all_rows if r.solicitation_number])
-    if os.getenv("GOOGLE_SHEETS_ID") and os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON"):
-        try:
-            write_sca_bids(all_rows)
-        except Exception:
-            logger.exception("Optional Sheets export failed")
-    return {"per_source": per_source, "total_rows": len(all_rows)}
-
-
-async def run_full_scrape() -> dict:
     summary = {}
-    for name, collector in (("factsheets", run_factsheet_scrape), ("scainfohub", run_scainfohub_scrape),
-                            ("dasny", collect_dasny), ("nyscr", collect_nyscr), ("sca_awards", collect_awards)):
-        try:
-            result = await collector()
-            summary[name] = upsert_projects(result) if isinstance(result, list) else result
-        except Exception as exc:
-            logger.exception("Collector %s failed", name)
-            summary[name] = {"error": str(exc)}
-    logger.info("Full run complete: %s", summary)
+    for source, url in SCAINFOHUB_URLS.items():
+        html = await renderer.render(url, wait_seconds=4)
+        rows = parse_scainfohub_table(html, source=source)
+        items = [dict(source=f"sca_{source}", source_id=row.solicitation_number,
+                      source_url=url, title=row.school_description, stage="advertised",
+                      deadline=row.bid_open_date, description=f"Contract type: {row.contract_type}")
+                 for row in rows if row.solicitation_number and row.school_description]
+        summary[source] = {"parsed": len(rows), "stored": upsert_projects(items)}
     return summary
 
 
-def require_admin(x_admin_token: str | None = Header(default=None)):
-    token = os.getenv("ADMIN_TOKEN")
-    if not token or not x_admin_token or not secrets.compare_digest(x_admin_token, token):
-        raise HTTPException(401, "Admin token required")
+async def run_full_scrape():
+    global last_run
+    if run_lock.locked():
+        return {"status": "already_running"}
+    async with run_lock:
+        summary = {}
+        last_run = {"status": "running"}
+        for name, collector in (("dasny", collect_dasny), ("nyscr", collect_nyscr),
+                                ("sca_awards", collect_awards), ("sca_bids", run_scainfohub),
+                                ("sca_factsheets", run_factsheets)):
+            try:
+                result = await collector()
+                summary[name] = upsert_projects(result) if isinstance(result, list) else result
+            except Exception as exc:
+                log.exception("Collector %s failed", name)
+                summary[name] = {"error": str(exc)}
+            last_run = {"status": "running", **summary}
+        last_run = {"status": "complete", **summary}
+        log.info("Collection complete: %s", summary)
+        return summary
 
 
 @app.post("/run", dependencies=[Depends(require_admin)])
 async def trigger_run(background_tasks: BackgroundTasks):
-    """Kicks off a full scrape (factsheets + scainfohub) in the background
-    and returns immediately, so slow-running scrapes never trip a proxy's
-    or client's connection/idle timeout while waiting for a response."""
+    if run_lock.locked():
+        return {"status": "already_running"}
     background_tasks.add_task(run_full_scrape)
-    return {"status": "started", "message": "Scrape running in background. Check /api/bids shortly for results."}
-
-
-@app.post("/run/factsheets", dependencies=[Depends(require_admin)])
-async def trigger_factsheets():
-    return await run_factsheet_scrape()
-
-
-@app.post("/run/scainfohub", dependencies=[Depends(require_admin)])
-async def trigger_scainfohub():
-    return await run_scainfohub_scrape()
-
-
-@app.get("/api/bids")
-async def api_bids():
-    """Live JSON data for the client-facing website to consume directly -
-    this is what makes the data appear 'live on the website' instead of
-    only living in the Google Sheet."""
-    with session() as db:
-        projects = db.scalars(select(Project).order_by(Project.last_seen.desc()).limit(1000)).all()
-        return {"factsheets": [as_dict(p) for p in projects if p.source == "sca_factsheet"],
-                "advertised_limited_bids": [as_dict(p) for p in projects if p.source in ("sca_advertised", "sca_limited")]}
+    return {"status": "started"}
 
 
 @app.get("/api/projects")
-async def api_projects(source: str | None = None, limit: int = 100):
-    with session() as db:
-        query = select(Project).order_by(Project.last_seen.desc()).limit(min(max(limit, 1), 1000))
-        if source:
-            query = query.where(Project.source == source)
-        return [{k: v for k, v in as_dict(p).items() if k not in ("contractor_email", "contact_evidence")}
-                for p in db.scalars(query).all()]
+async def api_projects(source: str | None = None, limit: int = 1000):
+    rows = read_projects()
+    if source:
+        rows = [row for row in rows if row["source"] == source]
+    return rows[:min(max(limit, 1), 5000)]
 
 
-class ContactEvidence(BaseModel):
-    contractor: str
-    email: str
-    evidence_url: str
+@app.get("/api/projects/private", dependencies=[Depends(require_admin)])
+async def api_private_projects(source: str | None = None):
+    """n8n may read verified contractor contacts and email status from the ledger."""
+    rows = read_projects(private=True)
+    return [row for row in rows if row["source"] == source] if source else rows
 
 
-@app.put("/api/projects/{project_id}/contact", dependencies=[Depends(require_admin)])
-async def set_contact(project_id: int, contact: ContactEvidence):
-    from urllib.parse import urlparse
-    if not contact.contractor.strip() or not urlparse(contact.evidence_url).scheme in ("http", "https"):
-        raise HTTPException(422, "Contractor and public evidence URL required")
-    if not __import__("re").fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", contact.email):
-        raise HTTPException(422, "Invalid email")
-    with session() as db:
-        project = db.get(Project, project_id)
-        if not project:
-            raise HTTPException(404, "Project not found")
-        project.contractor, project.contractor_email, project.contact_evidence = contact.contractor.strip(), contact.email.strip(), contact.evidence_url
-        db.commit()
-    return {"status": "contact_recorded", "note": "Review that evidence links this exact contractor to this email before drafting"}
+@app.post("/api/outreach/claim", dependencies=[Depends(require_admin)])
+async def claim_outreach():
+    async with outreach_lock:
+        return {"project": claim_approved_contact()}
 
 
-@app.post("/api/projects/{project_id}/draft", dependencies=[Depends(require_admin)])
-async def create_draft(project_id: int):
+class SentMessage(BaseModel):
+    row_number: int
+    source: str
+    source_id: str
+    recipient: str
+    message_id: str
+
+
+@app.post("/api/outreach/sent", dependencies=[Depends(require_admin)])
+async def log_sent(message: SentMessage):
+    if not message.message_id.strip() or message.row_number < 2:
+        raise HTTPException(422, "Gmail message ID and valid row required")
     try:
-        return {"draft_id": await draft_for(project_id)}
+        return mark_sent(message.row_number, message.source, message.source_id,
+                         message.recipient, message.message_id)
     except ValueError as exc:
-        raise HTTPException(400, str(exc))
+        raise HTTPException(409, str(exc))
 
 
-@app.get("/api/outreach", dependencies=[Depends(require_admin)])
-async def list_outreach():
-    with session() as db:
-        return [as_dict(r) for r in db.scalars(select(Outreach).order_by(Outreach.created_at.desc()).limit(500)).all()]
+@app.get("/api/bids")
+async def legacy_bids():
+    rows = read_projects()
+    return {"factsheets": [r for r in rows if r["source"] == "sca_factsheet"],
+            "advertised_limited_bids": [r for r in rows if r["source"] in ("sca_advertised", "sca_limited")]}
 
 
-class DraftEdit(BaseModel):
-    subject: str
-    body: str
-
-
-@app.put("/api/outreach/{draft_id}", dependencies=[Depends(require_admin)])
-async def edit_draft(draft_id: int, edit: DraftEdit):
-    if not edit.subject.strip() or not edit.body.strip():
-        raise HTTPException(422, "Subject and body required")
-    with session() as db:
-        draft = db.get(Outreach, draft_id)
-        if not draft or draft.status not in ("draft", "approved"):
-            raise HTTPException(404, "Editable draft not found")
-        draft.subject, draft.body = edit.subject.strip(), edit.body.strip()
-        draft.approved, draft.status = False, "draft"
-        db.commit()
-    return {"status": "draft", "note": "Editing requires fresh approval"}
-
-
-@app.post("/api/outreach/{draft_id}/approve", dependencies=[Depends(require_admin)])
-async def approve_draft(draft_id: int):
-    with session() as db:
-        draft = db.get(Outreach, draft_id)
-        if not draft or draft.status != "draft":
-            raise HTTPException(404, "Unsent draft not found")
-        draft.approved, draft.status = True, "approved"
-        db.commit()
-    return {"status": "approved", "note": "Call /send separately to deliver"}
-
-
-@app.post("/api/outreach/{draft_id}/send", dependencies=[Depends(require_admin)])
-async def send_draft(draft_id: int):
-    try:
-        send_approved(draft_id)
-        return {"status": "sent"}
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-
-
-@app.get("/", response_class=HTMLResponse)
-async def dashboard():
-    """A simple, self-contained live dashboard. Point your real website's
-    domain at this service (or embed this page in an iframe, or have your
-    website's own frontend call /api/bids directly) - either works."""
-    return """
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>NYC SCA Live Bid Data</title>
-<style>
-  :root { color-scheme: light dark; }
-  body { font-family: -apple-system, Segoe UI, Arial, sans-serif; margin: 0; padding: 24px; background: Canvas; color: CanvasText; }
-  h1 { font-size: 1.4rem; }
-  h2 { font-size: 1.1rem; margin-top: 2rem; }
-  table { border-collapse: collapse; width: 100%; margin-top: 0.5rem; font-size: 0.85rem; }
-  th, td { border: 1px solid #8888; padding: 6px 8px; text-align: left; vertical-align: top; }
-  th { background: #8882; position: sticky; top: 0; }
-  .updated { color: #888; font-size: 0.8rem; }
-  .wrap { overflow-x: auto; }
-</style>
-</head>
-<body>
-  <h1>Construction Project Monitor</h1>
-  <div class="updated" id="updated">Loading...</div>
-
-  <h2>Projects from all active sources</h2>
-  <div class="wrap"><table id="projectsTable"><thead></thead><tbody></tbody></table></div>
-
-<script>
-function renderTable(tableId, rows) {
-  const table = document.getElementById(tableId);
-  if (!rows.length) { table.querySelector('tbody').innerHTML = '<tr><td>No data yet</td></tr>'; return; }
-  const headers = ['source', 'source_id', 'title', 'stage', 'deadline', 'contractor', 'source_url', 'first_seen', 'last_seen'];
-  const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  table.querySelector('thead').innerHTML = '<tr>' + headers.map(h => `<th>${escapeHTML(h)}</th>`).join('') + '</tr>';
-  table.querySelector('tbody').innerHTML = rows.map(r =>
-    '<tr>' + headers.map(h => `<td>${escapeHTML(r[h])}</td>`).join('') + '</tr>'
-  ).join('');
-}
-
-async function refresh() {
-  try {
-    const res = await fetch('/api/projects');
-    const data = await res.json();
-    renderTable('projectsTable', data || []);
-    document.getElementById('updated').textContent = 'Last refreshed: ' + new Date().toLocaleString();
-  } catch (e) {
-    document.getElementById('updated').textContent = 'Failed to load data - ' + e;
-  }
-}
-
-refresh();
-setInterval(refresh, 60000); // auto-refresh every 60 seconds
-</script>
-</body>
-</html>
-"""
+@app.get("/api/status")
+async def status():
+    return {"running": run_lock.locked(), "last_run": last_run}
 
 
 @app.get("/health")
@@ -283,15 +157,26 @@ async def health():
     return {"status": "ok"}
 
 
+@app.get("/", response_class=HTMLResponse)
+async def dashboard():
+    return """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bid Monitor</title><style>body{font:15px system-ui,sans-serif;margin:0;background:#f7f9fc;color:#172235}header{background:#102343;color:white;padding:24px}main{padding:24px;max-width:1500px;margin:auto}.controls{display:flex;gap:12px;flex-wrap:wrap;margin:16px 0}select,input{padding:10px;border:1px solid #bbc7d6;border-radius:6px}.wrap{overflow:auto;background:white;border:1px solid #dce3ec;border-radius:8px}table{border-collapse:collapse;width:100%;min-width:950px}th,td{padding:10px;text-align:left;border-bottom:1px solid #e5eaf0;vertical-align:top}th{background:#eaf0f7;position:sticky;top:0}a{color:#0758a5}small{color:#637185}</style></head>
+<body><header><h1>Bid Monitor</h1><span>Public construction opportunities and project factsheets</span></header><main>
+<div class="controls"><label>Source <select id="source"><option value="">All sources</option></select></label><label>Search <input id="search" placeholder="Project, contractor, ID"></label></div>
+<p id="status">Loading projects…</p><div class="wrap"><table><thead><tr><th>Source</th><th>Project</th><th>Stage</th><th>Deadline</th><th>Contractor</th><th>First seen</th><th>Source link</th></tr></thead><tbody id="rows"></tbody></table></div><p><small>Last seen means the collector observed the record; project deadlines come from the source.</small></p></main>
+<script>
+let all=[];const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function show(){const source=document.getElementById('source').value,q=document.getElementById('search').value.toLowerCase();const items=all.filter(r=>(!source||r.source===source)&&[r.title,r.contractor,r.source_id].join(' ').toLowerCase().includes(q));document.getElementById('status').textContent=items.length+' projects shown · '+all.length+' total';document.getElementById('rows').innerHTML=items.map(r=>'<tr><td>'+esc(r.source)+'</td><td><strong>'+esc(r.title)+'</strong><br><small>'+esc(r.source_id)+'</small></td><td>'+esc(r.stage)+'</td><td>'+esc(r.deadline)+'</td><td>'+esc(r.contractor)+'</td><td>'+esc(r.first_seen)+'</td><td><a href="'+esc(r.source_url)+'" target="_blank" rel="noopener noreferrer">View source</a></td></tr>').join('')||'<tr><td colspan="7">No matching projects</td></tr>'}
+async function load(){try{let res=await fetch('/api/projects?limit=5000');if(!res.ok)throw Error('HTTP '+res.status);all=await res.json();const selected=document.getElementById('source').value;document.getElementById('source').innerHTML='<option value="">All sources</option>'+[...new Set(all.map(r=>r.source))].sort().map(s=>'<option value="'+esc(s)+'">'+esc(s)+'</option>').join('');document.getElementById('source').value=selected;show()}catch(e){document.getElementById('status').textContent='Could not load projects: '+e}}
+document.getElementById('source').addEventListener('change',show);document.getElementById('search').addEventListener('input',show);load();setInterval(load,60000);
+</script></body></html>"""
+
+
 @app.on_event("startup")
 async def start_scheduler():
-    init_db()
-    interval_hours = float(os.getenv("SCRAPE_INTERVAL_HOURS", "12"))
-    if interval_hours <= 0:
-        logger.info("SCRAPE_INTERVAL_HOURS <= 0 - automatic scheduling disabled, use POST /run manually.")
-        return
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(run_full_scrape, "interval", hours=interval_hours)
-    scheduler.start()
-    asyncio.create_task(run_full_scrape())
-    logger.info("Scheduled automatic runs every %s hours.", interval_hours)
+    interval = float(os.getenv("SCRAPE_INTERVAL_HOURS", "12"))
+    if interval > 0:
+        scheduler = AsyncIOScheduler()
+        scheduler.add_job(run_full_scrape, "interval", hours=interval, max_instances=1)
+        scheduler.start()
+        asyncio.create_task(run_full_scrape())

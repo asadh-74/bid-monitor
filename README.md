@@ -1,52 +1,53 @@
-# Bid Monitor
+# Bid Monitor (free Render + Google Sheets)
 
-FastAPI dashboard and scheduled collectors for public construction projects. PostgreSQL is the durable record; Google Sheets is an optional export of the existing SCA feeds.
+The Render app collects public opportunities into one `Projects` tab in the **existing Google Sheet**. The sheet is durable when the free web service sleeps or restarts. `/api/projects` and the dashboard read that tab. n8n owns contact review, AI drafting, Gmail delivery, and writing email status back to the sheet.
 
-## Source coverage
+## Sources
 
-| Source | Status | Notes |
-| --- | --- | --- |
-| SCA factsheets: New Schools and Projects in Construction | Implemented | Playwright discovers PDFs and extracts project and contractor. |
-| SCA advertised and limited bids | Implemented | scainfohub tables; bid specialist is not a contractor contact. |
-| DASNY construction contracts | Added, requires live Render verification | Parses listings; rejects missing title or solicitation. |
-| NYS Contract Reporter | Added, requires live Render verification | Pages through open notices (default cap 40 pages), keeping construction categories. Optional `NYSCR_AGENCY_FILTER` narrows by exact agency text. This is statewide data unless filtered. |
-| SCA anticipated awards | Experimental | Reports an error if a contract table cannot be verified. |
-| Construction.com | Not integrated | Requires an authorized project feed or API, not its homepage. |
+| Collector | Coverage |
+| --- | --- |
+| SCA project factsheets | New Schools and Projects in Construction categories; only project PDFs with confirmed project fields are accepted. Historical occupancy dates are marked `historical`. |
+| SCA advertised and limited bids | scainfohub tables; specialist contact is a procurement contact, **not** a contractor recipient. |
+| DASNY construction contracts | Listings and pagination from the construction contracts source. |
+| NYS Contract Reporter | Paginated open construction notices (up to `NYSCR_MAX_PAGES`, default 40). The optional `NYSCR_AGENCY_FILTER` narrows the agency; blank means statewide construction. |
+| SCA anticipated CIP and capacity contracts | NYC Open Data's official public datasets `tsak-vtv3` and `6m3u-8rbh`. Dates are left blank when the dataset omits them. These are **anticipated**, not awarded. |
+| Construction.com / Dodge | Requires an authorized Dodge project API or licensed data feed; the marketing homepage has no downloadable project listing. |
 
-Each collector fails independently. `GET /api/projects` serves the latest 100 records by default, supports `source` and `limit` (maximum 1000), and excludes contact email and evidence. A failed collector does not create guessed data.
+Each collector fails independently and `/api/status` reports its most recent in-process results. `/health` only checks that FastAPI is up. The current site must be redeployed from this branch before new sources appear; repository code alone does not change the live service.
 
-## Render setup
+## Render configuration
 
-Create a Blueprint from this repository. It provisions a Starter web service and persistent PostgreSQL database. Set `ADMIN_TOKEN` to a long random secret. Optional variables: `NYSCR_AGENCY_FILTER`, `NYSCR_MAX_PAGES`, `GOOGLE_SHEETS_ID`, `GOOGLE_SERVICE_ACCOUNT_JSON`, `OPENAI_API_KEY`, `OPENAI_MODEL`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `MAIL_FROM`. Keep secrets in Render environment variables. `SCRAPE_INTERVAL_HOURS` defaults to 12; 0 disables automatic runs. The service initializes tables and starts collection on startup.
+Keep the existing `GOOGLE_SHEETS_ID` and `GOOGLE_SERVICE_ACCOUNT_JSON`. Set a long random `ADMIN_TOKEN` as a Render environment secret. The service account must have Editor access to the sheet. The app creates `Projects` with these columns: Source, Source ID, Source URL, Title, Stage, Deadline, Contractor, Contractor Email, Contact Evidence, Description, First Seen UTC, Last Seen UTC, Email Status, Email Sent UTC, Review Notes. Existing `Bids` and SCA tabs are not modified or deleted.
 
-- `GET /` dashboard
-- `GET /api/projects?source=dasny&limit=100` unified project feed
-- `GET /api/bids` legacy SCA-only JSON
-- `GET /health` process check (not a freshness guarantee)
-- `POST /run` all collectors, `POST /run/factsheets` and `POST /run/scainfohub` targeted runs; all require `X-Admin-Token`
+A free Render service may sleep between visits; the app starts a collection on wake and repeats it every `SCRAPE_INTERVAL_HOURS` while running. For reliable periodic collection even while it sleeps, schedule an n8n HTTP Request `POST https://bid-monitor.onrender.com/run` with `X-Admin-Token` in n8n's Header Auth credential. The endpoint returns `started` before a run completes; poll `/api/status` for per-source results. Avoid triggering overlapping runs.
 
-A successful deployment and source-specific run are necessary before claiming live coverage. Repository changes alone do not deploy.
+- `GET /` searchable, source-filterable dashboard
+- `GET /api/projects?source=dasny&limit=1000` public feed without private contact columns
+- `GET /api/projects/private` full ledger for n8n, requires `X-Admin-Token`
+- `GET /api/bids` SCA-only compatibility feed with the new schema
+- `GET /api/status` last in-process collector results
+- `POST /run` starts collection, requires `X-Admin-Token`
 
-## Contractor outreach
+## Contractor email with n8n
 
-Outreach is off by default. A factsheet may name a contractor without giving an email. A bid specialist email belongs to the procurement office and is never used as a contractor recipient.
+Import [`n8n/contractor_email_workflow.json`](n8n/contractor_email_workflow.json) as a **separate, inactive** workflow. Configure the Header Auth credential (`X-Admin-Token`) on both HTTP nodes, the Gemini credential, and Gmail credential. Replace `REPLACE_WITH_YOUR_COMPANY_AND_OFFERING` in the AI prompt. Test with your own approved test recipient before activating the hourly trigger. Never place the admin token in the workflow JSON or public dashboard.
 
-1. Manually confirm a public email belongs to the named contractor. Record contractor, email, and public `evidence_url` with `PUT /api/projects/{id}/contact`. The endpoint records your assertion; you must check its evidence.
-2. `POST /api/projects/{id}/draft` creates a draft using `OPENAI_API_KEY` if configured, or a plain template otherwise. It does not send.
-3. `GET /api/outreach` shows recipient and draft for review. `PUT /api/outreach/{id}` edits its subject and body, resetting approval.
-4. `POST /api/outreach/{id}/approve`, then separately `POST /api/outreach/{id}/send`. Delivery requires SMTP credentials. A delivery error is marked `delivery_uncertain` and must be checked manually before retrying.
+Only mark a project `APPROVED` in **Email Status** after you confirm that **Contractor Email** belongs to the named **Contractor**, save the public proof URL in **Contact Evidence**, and review the intended outreach. Do not use the SCA procurement specialist's email as a contractor recipient. The n8n workflow:
 
-All outreach routes require `X-Admin-Token: <ADMIN_TOKEN>`. Never put that token in a public frontend. These are API endpoints; an authenticated review interface remains to be built for easier operator use.
+1. Read the `Projects` sheet and take only rows with `Email Status = APPROVED`, a named contractor, a validated contractor email and evidence URL.
+2. Calls `POST /api/outreach/claim` to change one row to `SENDING` **before** calling the AI model or Gmail. If a later node fails, investigate the `SENDING` row manually instead of sending it again blindly.
+3. Ask the AI model for a concise email using only the stored project facts and your company's approved offering. Review the prompt and model output before activating automatic sending.
+4. Sends via the connected Gmail node to the exact approved email, then calls `POST /api/outreach/sent` to set `Email Status = SENT`, `Email Sent UTC` and Gmail message ID. If Gmail succeeded but logging failed, check Sent Mail and resolve the `SENDING` row manually.
 
-## Local development
+Your deactivated `DASNY + NYCSCA + Universal AI Fallback v4` workflow should remain off as a **scraper**; a separate n8n workflow can handle scheduling and email delivery. The repository does not include sender credentials or automatically send email. The sheet's recipient and sender credentials must be connected in n8n before activating it.
+
+## Local run
 
 ```bash
-python -m venv .venv
-. .venv/bin/activate
 pip install -r requirements.txt
 playwright install chromium
-# Set DATABASE_URL to a local PostgreSQL database and ADMIN_TOKEN to a secret
+# Set GOOGLE_SHEETS_ID, GOOGLE_SERVICE_ACCOUNT_JSON, and ADMIN_TOKEN
 uvicorn app.main:app --reload
 ```
 
-SQLite may be used for isolated local tests (`DATABASE_URL=sqlite:////tmp/bid-monitor-test.db`). Use PostgreSQL on Render because web-service filesystem data is ephemeral.
+Scraping can fail when a source changes markup or blocks a Render IP. Inspect `/api/status` and Render logs, then update that source parser; do not treat an empty tab as a successful scrape.
