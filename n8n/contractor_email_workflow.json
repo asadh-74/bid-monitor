@@ -1,5 +1,5 @@
 {
-  "name": "Bid Monitor - Reviewed Contractor Outreach",
+  "name": "Bid Monitor - Reviewed Contractor Outreach (manual only)",
   "nodes": [
     {
       "id": "manual",
@@ -11,26 +11,6 @@
         120
       ],
       "parameters": {}
-    },
-    {
-      "id": "schedule",
-      "name": "Hourly Check",
-      "type": "n8n-nodes-base.scheduleTrigger",
-      "typeVersion": 1.2,
-      "position": [
-        0,
-        320
-      ],
-      "parameters": {
-        "rule": {
-          "interval": [
-            {
-              "field": "hours",
-              "hoursInterval": 1
-            }
-          ]
-        }
-      }
     },
     {
       "id": "claim",
@@ -154,17 +134,6 @@
   ],
   "connections": {
     "Manual Test": {
-      "main": [
-        [
-          {
-            "node": "Claim Approved Project",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Hourly Check": {
       "main": [
         [
           {
