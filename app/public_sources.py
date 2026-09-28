@@ -51,6 +51,27 @@ def parse_dasny(html):
     return records
 
 
+def parse_dasny_contact(html, url):
+    """DASNY staff named in a solicitation are owner contacts, never awarded GCs."""
+    soup = BeautifulSoup(html, "html.parser")
+    text = soup.get_text(" ", strip=True)
+    # The pre-bid notice usually says "Contact Name, Title ... at email or phone".
+    match = re.search(r"\bContact\s+([A-Z][A-Za-z.' -]{3,65}?),\s*([^\n]{0,180}?)\b([\w.+-]+@dasny\.org)\b", text, re.I)
+    if not match:
+        # Some notices name designated staff without a pre-bid contact sentence.
+        match = re.search(r"Designated staff for this solicitation is:\s*([A-Z][A-Za-z.' -]{3,65}?),\s*([^\n]{0,180}?)\b([\w.+-]+@dasny\.org)\b", text, re.I)
+    if not match:
+        return {}
+    name = match.group(1).strip()
+    if len(name.split()) > 5:
+        return {}
+    context = text[match.start():match.end()+50]
+    phone = re.search(r"\(?\d{3}\)?[ -]?\d{3}[ -]?\d{4}", context)
+    return dict(source_contact_name=name, source_contact_email=match.group(3),
+                source_contact_phone=phone.group(0) if phone else "",
+                source_contact_role="DASNY procurement contact", source_contact_evidence=url)
+
+
 def parse_nyscr(html, agency_filter="", construction_only=True):
     soup = BeautifulSoup(html, "html.parser")
     records = []
@@ -91,6 +112,14 @@ async def collect_dasny():
             break
     if not rows:
         raise ValueError("DASNY returned no valid opportunity records; check page structure")
+    async with httpx.AsyncClient(timeout=25, follow_redirects=True) as client:
+        for row in rows.values():
+            try:
+                response = await client.get(row["source_url"])
+                response.raise_for_status()
+                row.update(parse_dasny_contact(response.text, row["source_url"]))
+            except Exception as exc:
+                log.warning("DASNY contact unavailable for %s: %s", row["source_url"], exc)
     return list(rows.values())
 
 
