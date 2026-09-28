@@ -56,7 +56,8 @@ def parse_dasny_contact(html, url):
     soup = BeautifulSoup(html, "html.parser")
     text = soup.get_text(" ", strip=True)
     # Keep a named agency contact even if email markup is unavailable to HTTP.
-    match = re.search(r"\bContact\s+([A-Z][A-Za-z.' -]{3,65}?),\s*", text, re.I)
+    # Some notices say "Contact Brian Francis at ..." without a comma.
+    match = re.search(r"(?i:\bcontact)\s+([A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){1,3})(?=\s*(?:,|\bat\b|\(?\d{3}\)?))", text)
     if not match:
         match = re.search(r"Designated staff for this solicitation is:\s*([A-Z][A-Za-z.' -]{3,65}?),\s*", text, re.I)
     if not match:
