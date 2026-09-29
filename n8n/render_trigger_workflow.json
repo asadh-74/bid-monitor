@@ -1,0 +1,112 @@
+{
+  "name": "Bid Monitor - Render Collector Trigger (free tier)",
+  "nodes": [
+    {
+      "id": "manual-trigger",
+      "name": "Manual Test",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [-720, 80],
+      "parameters": {}
+    },
+    {
+      "id": "schedule-trigger",
+      "name": "Every 6 Hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-720, 280],
+      "parameters": {"rule": {"interval": [{"field": "hours", "hoursInterval": 6}]}}
+    },
+    {
+      "id": "wake-render",
+      "name": "Wake Render and Check Health",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-460, 180],
+      "parameters": {
+        "method": "GET",
+        "url": "https://bid-monitor.onrender.com/health",
+        "options": {"timeout": 120000}
+      },
+      "retryOnFail": true,
+      "maxTries": 6,
+      "waitBetweenTries": 30000
+    },
+    {
+      "id": "start-collector",
+      "name": "Start Collection",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-200, 180],
+      "parameters": {
+        "method": "POST",
+        "url": "https://bid-monitor.onrender.com/run",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {"timeout": 120000}
+      },
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 30000
+    },
+    {
+      "id": "check-start",
+      "name": "Check Start Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [40, 180],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const response = $input.first().json; if (!['started', 'already_running'].includes(response.status)) throw new Error('Unexpected /run response: ' + JSON.stringify(response)); return [{json: response}];"
+      }
+    },
+    {
+      "id": "wait-for-collection",
+      "name": "Wait for Collection",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [280, 180],
+      "parameters": {"resume": "timeInterval", "amount": 7, "unit": "minutes"},
+      "webhookId": "bid-monitor-wait-collection"
+    },
+    {
+      "id": "get-status",
+      "name": "Read Collection Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [520, 180],
+      "parameters": {
+        "method": "GET",
+        "url": "https://bid-monitor.onrender.com/api/status",
+        "options": {"timeout": 120000}
+      },
+      "retryOnFail": true,
+      "maxTries": 6,
+      "waitBetweenTries": 30000
+    },
+    {
+      "id": "verify-results",
+      "name": "Verify Source Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [760, 180],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const data = $input.first().json; const run = data.last_run || {}; if (data.running || run.status !== 'complete') throw new Error('Collection has not completed after 7 minutes. Check /api/status and Render logs. Status: ' + JSON.stringify(data)); const errors = Object.entries(run).filter(([name, result]) => name !== 'status' && result && typeof result === 'object' && result.error).map(([name, result]) => name + ': ' + result.error); if (errors.length) throw new Error('Source collector errors: ' + errors.join(' | ')); return [{json: {status: 'complete', sources: run, checked_at: new Date().toISOString()}}];"
+      }
+    }
+  ],
+  "connections": {
+    "Manual Test": {"main": [[{"node": "Wake Render and Check Health", "type": "main", "index": 0}]]},
+    "Every 6 Hours": {"main": [[{"node": "Wake Render and Check Health", "type": "main", "index": 0}]]},
+    "Wake Render and Check Health": {"main": [[{"node": "Start Collection", "type": "main", "index": 0}]]},
+    "Start Collection": {"main": [[{"node": "Check Start Response", "type": "main", "index": 0}]]},
+    "Check Start Response": {"main": [[{"node": "Wait for Collection", "type": "main", "index": 0}]]},
+    "Wait for Collection": {"main": [[{"node": "Read Collection Status", "type": "main", "index": 0}]]},
+    "Read Collection Status": {"main": [[{"node": "Verify Source Results", "type": "main", "index": 0}]]}
+  },
+  "active": false,
+  "settings": {"executionOrder": "v1"},
+  "pinData": {},
+  "meta": {"templateCredsSetupCompleted": false}
+}
