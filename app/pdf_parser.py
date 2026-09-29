@@ -49,20 +49,18 @@ LEGACY_LABELS = ("PROJECT TYPE", "LOCATION", "SCHOOL DISTRICT", "CAPACITY",
 
 def _legacy_factsheet(doc, text: str, pdf_url: str) -> Optional[FactsheetData]:
     """Read the older two-column SCA factsheets from their right-hand field column."""
-    columns = []
-    for page in doc:
-        blocks = sorted((block for block in page.get_text("blocks")
-                         if block[0] >= page.rect.width * 0.65
-                         and block[1] < page.rect.height * 0.88), key=lambda block: block[1])
-        columns.extend(block[4] for block in blocks)
-    right = "\n".join(columns)
+    # PyMuPDF 1.24 groups some right-column text with the left column in
+    # get_text("blocks"). A geometric clip extracts the labels consistently.
+    right = "\n".join(page.get_text("text", clip=fitz.Rect(
+        page.rect.width * 0.65, 0, page.rect.width, page.rect.height * 0.88))
+        for page in doc)
     labels = [re.escape(label).replace(r"\ ", r"\s+") for label in LEGACY_LABELS]
     markers = list(re.finditer(r"\b(?:" + "|".join(labels) + r")\b", right))
     fields = {}
     for index, marker in enumerate(markers):
         value = right[marker.end():markers[index + 1].start() if index + 1 < len(markers) else None]
         # The footer often follows the final contractor on the same text block.
-        value = re.split(r"\bNEW YORK CITY SCHOOL\s+CONSTRUCTION AUTHORITY\s+30-30\b", value, maxsplit=1)[0]
+        value = re.split(r"\n\s*\n|\bNEW YORK CITY SCHOOL\s+CONSTRUCTION AUTHORITY\b", value.strip(), maxsplit=1)[0]
         fields[" ".join(marker.group().split())] = " ".join(value.split()).strip(" :")
     filename = unquote(urlsplit(pdf_url).path.rsplit("/", 1)[-1])
     code = re.search(r"\b([KMQXR]\d{2,4})\b", filename, re.I)
