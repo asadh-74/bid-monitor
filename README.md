@@ -21,6 +21,8 @@ Keep the existing `GOOGLE_SHEETS_ID` and `GOOGLE_SERVICE_ACCOUNT_JSON`. Set a lo
 
 A free Render service may sleep between visits; the app starts a collection on wake and repeats it every `SCRAPE_INTERVAL_HOURS` while running. For reliable periodic collection even while it sleeps, schedule an n8n HTTP Request `POST https://bid-monitor.onrender.com/run` with `X-Admin-Token` in n8n's Header Auth credential. The endpoint returns `started` before a run completes; poll `/api/status` for per-source results. Avoid triggering overlapping runs.
 
+Import [`n8n/render_trigger_workflow.json`](n8n/render_trigger_workflow.json) to replace the old three-node Render trigger. It starts inactive, has a manual test and six-hour schedule, warms `/health` with retries for free-tier 503 responses, posts `/run`, waits seven minutes, and checks `/api/status` for completion and source errors. Set `ADMIN_TOKEN` in Render and select an n8n **Header Auth** credential named `X-Admin-Token` with the same secret on **Start Collection**; the secret is not in the JSON. Test manually before publishing the schedule. Persistent 503s or a failed source still require Render log investigation. Keep the older Render trigger inactive to avoid duplicate schedules. Contractor email is a separate reviewed workflow below.
+
 - `GET /` searchable, source-filterable dashboard
 - `GET /api/projects?source=dasny&limit=1000` public feed without private contact columns
 - `GET /api/projects/private` full ledger for n8n, requires `X-Admin-Token`
