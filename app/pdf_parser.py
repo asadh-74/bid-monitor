@@ -12,6 +12,7 @@ import logging
 import re
 from dataclasses import dataclass, asdict
 from typing import Optional
+from urllib.parse import unquote, urlsplit
 
 import fitz  # PyMuPDF
 import httpx
@@ -41,6 +42,44 @@ def _field(text: str, label: str) -> str:
     return m.group(1).strip() if m else ""
 
 
+LEGACY_LABELS = ("PROJECT TYPE", "LOCATION", "SCHOOL DISTRICT", "CAPACITY",
+                 "CONTRACT AWARD", "CONSTRUCTION START", "ANTICIPATED OCCUPANCY",
+                 "ARCHITECT/ENGINEER", "CONSTRUCTION MANAGER", "GENERAL CONTRACTOR")
+
+
+def _legacy_factsheet(doc, text: str, pdf_url: str) -> Optional[FactsheetData]:
+    """Read the older two-column SCA factsheets from their right-hand field column."""
+    columns = []
+    for page in doc:
+        blocks = sorted((block for block in page.get_text("blocks")
+                         if block[0] >= page.rect.width * 0.65
+                         and block[1] < page.rect.height * 0.88), key=lambda block: block[1])
+        columns.extend(block[4] for block in blocks)
+    right = "\n".join(columns)
+    labels = [re.escape(label).replace(r"\ ", r"\s+") for label in LEGACY_LABELS]
+    markers = list(re.finditer(r"\b(?:" + "|".join(labels) + r")\b", right))
+    fields = {}
+    for index, marker in enumerate(markers):
+        value = right[marker.end():markers[index + 1].start() if index + 1 < len(markers) else None]
+        # The footer often follows the final contractor on the same text block.
+        value = re.split(r"\bNEW YORK CITY SCHOOL\s+CONSTRUCTION AUTHORITY\s+30-30\b", value, maxsplit=1)[0]
+        fields[" ".join(marker.group().split())] = " ".join(value.split()).strip(" :")
+    filename = unquote(urlsplit(pdf_url).path.rsplit("/", 1)[-1])
+    code = re.search(r"\b([KMQXR]\d{2,4})\b", filename, re.I)
+    if not (code and fields.get("PROJECT TYPE") and fields.get("LOCATION")
+            and fields.get("ARCHITECT/ENGINEER") and fields.get("GENERAL CONTRACTOR")):
+        return None
+    return FactsheetData(
+        project_id=code.group(1).upper(), project_name=text.strip().splitlines()[0].strip(),
+        project_type=fields["PROJECT TYPE"], location=fields["LOCATION"],
+        school_district=fields.get("SCHOOL DISTRICT", ""), capacity=fields.get("CAPACITY", ""),
+        grades_served="", contract_award=fields.get("CONTRACT AWARD", ""),
+        construction_start=fields.get("CONSTRUCTION START", ""),
+        occupancy_date=fields.get("ANTICIPATED OCCUPANCY", ""),
+        architect_engineer=fields["ARCHITECT/ENGINEER"],
+        general_contractor=fields["GENERAL CONTRACTOR"], source_pdf_url=pdf_url)
+
+
 FACTSHEET_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -64,6 +103,10 @@ async def fetch_and_parse_factsheet(pdf_url: str, project_id_hint: str = "") -> 
     try:
         doc = fitz.open(stream=resp.content, filetype="pdf")
         text = "\n".join(page.get_text() for page in doc)
+        legacy = None
+        if not all(re.search(rf"\b{label}\b\s*:", text, re.I)
+                   for label in ("Project Type", "Location", "General Contractor")):
+            legacy = _legacy_factsheet(doc, text, pdf_url)
         doc.close()
     except Exception as e:
         logger.error("Failed to parse PDF %s: %s", pdf_url, e)
@@ -72,6 +115,9 @@ async def fetch_and_parse_factsheet(pdf_url: str, project_id_hint: str = "") -> 
     if not text.strip():
         logger.warning("No extractable text in %s - may be a scanned image PDF", pdf_url)
         return None
+
+    if legacy:
+        return legacy
 
     # A project code alone is insufficient: unrelated PDFs on the page contain
     # incidental school codes and previously polluted the live factsheet table.
