@@ -6,6 +6,7 @@ import re
 from urllib.parse import parse_qs, urlparse
 
 from bs4 import BeautifulSoup
+from .project_fields import project_year
 
 log = logging.getLogger(__name__)
 BASE = 'https://admin.totalbiddata.com/'
@@ -166,9 +167,7 @@ async def collect_totalbiddata():
                 queue_summary[queue] = {'discovered': len(seen), 'total': total,
                                          'complete': total is not None and len(seen) >= total}
             # Repeated runs backfill missing records, then refresh oldest records.
-            ordered = sorted(discovered.values(), key=lambda r: (
-                r['source_id'] in existing,
-                existing.get(r['source_id'], {}).get('last_seen', ''), -int(r['source_id'])))
+            ordered = balanced_records(discovered.values(), existing)
             pending = []
             failures = 0
             for row in ordered[:batch_size]:
@@ -198,8 +197,31 @@ async def collect_totalbiddata():
                 stored += upsert_projects(pending)
         finally:
             await browser.close()
-    return {'status': 'partial' if failures or stored < len(discovered) or
+    return {'status': 'partial' if failures or stored < len(ordered) or
              any(not q['complete'] for q in queue_summary.values()) else 'complete',
-            'discovered': len(discovered), 'stored': stored, 'detail_errors': failures,
+            'discovered': len(discovered), 'eligible_2026': len(ordered), 'stored': stored, 'detail_errors': failures,
             'remaining_unstored': sum(r['source_id'] not in existing for r in ordered[batch_size:]),
             'detail_limit': batch_size, 'queues': queue_summary}
+
+
+
+def balanced_records(records, existing):
+    """Refresh each project phase rather than letting bidding starve awarded GCs."""
+    groups = {}
+    for row in records:
+        if project_year(row) != '2026':
+            continue
+        groups.setdefault(row.get('stage', 'unknown'), []).append(row)
+    for rows in groups.values():
+        rows.sort(key=lambda row: (row['source_id'] in existing,
+                                  existing.get(row['source_id'], {}).get('last_seen', ''),
+                                  -int(row['source_id'])))
+    ordered = []
+    while any(groups.values()):
+        for phase in ('awarded', 'bid_result', 'advertised', 'unknown'):
+            if groups.get(phase):
+                ordered.append(groups[phase].pop(0))
+        for phase in sorted(set(groups) - {'awarded', 'bid_result', 'advertised', 'unknown'}):
+            if groups[phase]:
+                ordered.append(groups[phase].pop(0))
+    return ordered
