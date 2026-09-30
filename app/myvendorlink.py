@@ -1,7 +1,9 @@
 """Authenticated VendorLink listings, using the unchanged Projects schema."""
 import os
 import re
-from urllib.parse import unquote
+from urllib.parse import unquote, urljoin, urlparse
+from datetime import datetime, timezone, timedelta
+from .participants import read_participants, write_participants
 from bs4 import BeautifulSoup
 
 ACTIVE = 'https://www.myvendorlink.com/internal/vendor/active'
@@ -47,7 +49,9 @@ def parse_detail(html, row):
         raise ValueError('VendorLink detail does not match listing')
     result = {k: v for k, v in row.items() if not k.startswith('_')}
     result['title'] = field('lblTitle') or row['title']
-    result['deadline'] = ' '.join(filter(None, [field('lblDueDate'), field('lblTimeZone')])) or row['deadline']
+    due = field('lblDueDate') or row['deadline']
+    zone = field('lblTimeZone')
+    result['deadline'] = (due if not zone or due.endswith(' ' + zone) else due + ' ' + zone) if due else 'Not listed'
     status = field('lblStatus')
     result['stage'] = {'active': 'advertised', 'awarded': 'awarded', 'cancelled': 'cancelled',
                        'canceled': 'cancelled', 'closed': 'closed'}.get(status.lower(), 'unknown')
@@ -63,8 +67,7 @@ def parse_detail(html, row):
         [('Status', 'lblStatus'), ('Fiscal year', 'lblFiscalYear'), ('Type', 'lblType'),
          ('Scope', 'lblNotes'), ('Questions due', 'lblQuestionEndDate'), ('Broadcast', 'lblBroadcastDate')]
         if field(name)])
-    # Planholders and bidders are not evidence of an awarded contractor.
-    return result
+    return write_participants(result, parse_participant_links(soup))
 
 
 async def collect_myvendorlink():
@@ -76,12 +79,21 @@ async def collect_myvendorlink():
     limit = min(max(int(os.getenv('MYVENDORLINK_DETAIL_LIMIT', '100')), 1), 1000)
     max_pages = min(max(int(os.getenv('MYVENDORLINK_MAX_PAGES', '100')), 1), 1000)
     existing = {r['source_id']: r for r in read_projects() if r['source'] == 'myvendorlink'}
+    profile_limit = min(max(int(os.getenv('MYVENDORLINK_PROFILE_LIMIT', '100')), 1), 1000)
+    profile_count, profile_errors = 0, 0
+    profile_cache = {}
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    for saved in existing.values():
+        for participant in read_participants(saved):
+            if participant.get('profile_checked', '') >= cutoff:
+                profile_cache[participant.get('evidence', '')] = participant
     discovered, total, complete = {}, None, False
     stored, failures, pending = 0, 0, []
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         try:
             page = await browser.new_page()
+            profile_page = await browser.new_page()
             await page.goto(ACTIVE, wait_until='domcontentloaded', timeout=45000)
             if await page.locator('#' + PREFIX + 'txtPassword').count():
                 await page.locator('#' + PREFIX + 'txtUsername').fill(email)
@@ -125,7 +137,24 @@ async def collect_myvendorlink():
                     async with page.expect_navigation(wait_until='domcontentloaded'):
                         await page.locator('#' + current['_view_id']).click()
                     await page.locator('#' + PREFIX + 'lblTitle').wait_for(timeout=20000)
-                    pending.append(parse_detail(await page.content(), current))
+                    detail = parse_detail(await page.content(), current)
+                    participants = read_participants(detail)
+                    for participant in participants:
+                        url = participant['evidence']
+                        cached = profile_cache.get(url)
+                        if cached and cached['name'].casefold() == participant['name'].casefold():
+                            participant.update({k: v for k, v in cached.items() if k != 'role'})
+                        elif profile_count < profile_limit:
+                            profile_count += 1
+                            try:
+                                await profile_page.goto(url, wait_until='domcontentloaded', timeout=30000)
+                                await profile_page.locator('#' + PREFIX + 'lblTextCompanyName').wait_for(timeout=15000)
+                                participant.update(parse_vendor_profile(await profile_page.content(), participant['name']))
+                                participant['profile_checked'] = datetime.now(timezone.utc).isoformat()
+                                profile_cache[url] = dict(participant)
+                            except Exception:
+                                profile_errors += 1
+                    pending.append(write_participants(detail, participants))
                     if len(pending) >= 20:
                         stored += upsert_projects(pending)
                         pending.clear()
@@ -138,4 +167,50 @@ async def collect_myvendorlink():
             await browser.close()
     return {'status': 'complete' if complete and not failures and len(ordered) <= limit else 'partial',
             'discovered': len(discovered), 'total': total, 'stored': stored,
-            'detail_errors': failures, 'detail_limit': limit, 'listing_complete': complete}
+            'detail_errors': failures, 'detail_limit': limit, 'listing_complete': complete,
+            'profiles_checked': profile_count, 'profile_errors': profile_errors, 'profile_limit': profile_limit}
+
+
+
+def parse_participant_links(soup):
+    result = []
+    for selector, role in (('#' + PREFIX + 'grvPlanholders', 'Planholder'),
+                           ('#' + PREFIX + 'divBidder', 'Bidder'),
+                           ('#' + PREFIX + 'divSupplemental', 'Supplemental vendor')):
+        for link in soup.select(selector + ' a[href]'):
+            url = urljoin(ACTIVE, link['href'])
+            parts = urlparse(url)
+            if parts.hostname != 'www.myvendorlink.com' or parts.path != '/internal/vendor/vendordetails' or not re.fullmatch(r'v=\d+', parts.query):
+                continue
+            tr = link.find_parent('tr')
+            cells = tr.find_all('td', recursive=False) if tr else []
+            name = cells[0].get_text(' ', strip=True) if cells else link.get_text(' ', strip=True)
+            if name:
+                result.append(dict(name=name, role=role, evidence=url, email='', phone=''))
+    return result
+
+
+def parse_vendor_profile(html, expected_name):
+    soup = BeautifulSoup(html, 'html.parser')
+    def field(name):
+        element = soup.find(id=PREFIX + name)
+        return element.get_text(' ', strip=True) if element else ''
+    actual = field('lblTextCompanyName')
+    if ' '.join(actual.casefold().split()) != ' '.join(expected_name.casefold().split()):
+        raise ValueError('Vendor profile does not match linked company')
+    contacts = []
+    for node in soup.select('span[id$="_lblTextContactLastName"]'):
+        base = node['id'].rsplit('_lblTextContactLastName', 1)[0]
+        def contact_field(suffix):
+            value = soup.find(id=base + '_' + suffix)
+            return value.get_text(' ', strip=True) if value else ''
+        name = ' '.join(filter(None, [contact_field('lblTextContactFirstName'), node.get_text(' ', strip=True)]))
+        emails = []
+        for email_node in soup.select('[id^="' + base + '_"][id*="Email"]'):
+            emails.extend(re.findall(r'[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+', email_node.get_text(' ', strip=True)))
+        contacts.append(dict(name=name, phone=contact_field('lblTextContactPhone'),
+                             email='; '.join(dict.fromkeys(emails)),
+                             role=contact_field('lblTextContactAddressTypeText')))
+    primary = next((c for c in contacts if c['role'].lower() == 'primary'), contacts[0] if contacts else {})
+    return dict(name=actual, phone=primary.get('phone', ''), email=primary.get('email', ''),
+                contact_name=primary.get('name', ''), contacts=contacts)
