@@ -11,8 +11,10 @@ services:
         sync: false
       - key: ADMIN_TOKEN
         sync: false
+      - key: ENABLE_LOCAL_SCRAPING
+        value: "false"
       - key: SCRAPE_INTERVAL_HOURS
-        value: "12"
+        value: "0"
       - key: RENDERER
         value: "playwright"
       - key: NYSCR_MAX_PAGES
