@@ -106,6 +106,12 @@ def enrich_record(row, fields, contacts):
                       source_contact_evidence=row['source_url'] + '#ui-tabs-3')
     for c in contacts:
         details.append(f"{c['role']}: {c['name']}; phone: {c['phone']}; email: {c['email']}; amount: {c['amount']}")
+    amounts = [f"{c['role']} — {c['name']}: {c['amount']}" for c in contacts
+               if c['role'].lower() in ('award', 'bidder', 'general contractor', 'contractor')
+               and re.fullmatch(r'\$?\s*\d[\d,]*(?:\.\d+)?', c['amount'].strip())
+               and float(c['amount'].strip().replace('$', '').replace(',', '')) > 0]
+    if amounts:
+        details.insert(0, 'Bidding amount: ' + '; '.join(amounts))
     result['description'] = '\n'.join(filter(None, details))
     return result
 

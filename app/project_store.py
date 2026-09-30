@@ -5,6 +5,7 @@ import re
 from datetime import datetime, timezone
 
 from .sheets_writer import _get_sheets_service
+from .project_fields import project_year
 
 log = logging.getLogger(__name__)
 TAB = "Projects"
@@ -63,7 +64,7 @@ def read_projects(private=False):
 
 def upsert_projects(items):
     items = list({(item["source"], item["source_id"]): item for item in items
-                  if item.get("source") and item.get("source_id") and item.get("source_url") and item.get("title")}.values())
+                  if item.get("source") and item.get("source_id") and item.get("source_url") and item.get("title") and project_year(item) == "2026"}.values())
     if not items:
         return 0
     service, sheet_id = _service()
@@ -101,7 +102,7 @@ def claim_approved_contact():
     service, sheet_id = _service()
     _ensure_tab(service, sheet_id)
     for row_number, row in enumerate(_rows(service, sheet_id), start=2):
-        if row["email_status"].strip().upper() != "APPROVED" or row["stage"] == "historical":
+        if row["email_status"].strip().upper() != "APPROVED" or row["stage"] == "historical" or project_year(row) != "2026":
             continue
         if not (row["contractor"].strip() and row["contact_evidence"].startswith("https://") and
                 re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", row["contractor_email"].strip())):

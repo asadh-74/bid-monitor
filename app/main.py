@@ -18,6 +18,7 @@ from .scraper import discover_factsheet_pdfs
 from .totalbiddata import collect_totalbiddata
 from .myvendorlink import collect_myvendorlink
 from .runtime_config import collectors_enabled
+from .project_fields import display_project
 from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -55,7 +56,7 @@ async def run_factsheets():
                               source_url=data.source_pdf_url, title=data.project_name,
                               stage=stage, contractor=data.general_contractor,
                               architect_engineer=data.architect_engineer,
-                              description=f"Type: {data.project_type}; Location: {data.location}; Category: {found.category}"))
+                              description=f"Type: {data.project_type}; Location: {data.location}; Category: {found.category}; Contract award date: {data.contract_award}"))
         await asyncio.sleep(0.5)
     return {"discovered": len(discovered), "valid": len(items), "stored": upsert_projects(items)}
 
@@ -111,7 +112,7 @@ async def trigger_run(background_tasks: BackgroundTasks):
 
 @app.get("/api/projects")
 async def api_projects(source: str | None = None, limit: int = 1000):
-    rows = read_projects()
+    rows = [display_project(row) for row in read_projects() if display_project(row)["project_year"] == "2026"]
     if source:
         rows = [row for row in rows if row["source"] == source]
     return rows[:min(max(limit, 1), 5000)]
@@ -120,7 +121,7 @@ async def api_projects(source: str | None = None, limit: int = 1000):
 @app.get("/api/projects/private", dependencies=[Depends(require_admin)])
 async def api_private_projects(source: str | None = None):
     """n8n may read verified contractor contacts and email status from the ledger."""
-    rows = read_projects(private=True)
+    rows = [display_project(row) for row in read_projects(private=True) if display_project(row)["project_year"] == "2026"]
     return [row for row in rows if row["source"] == source] if source else rows
 
 
@@ -151,7 +152,7 @@ async def log_sent(message: SentMessage):
 
 @app.get("/api/bids")
 async def legacy_bids():
-    rows = read_projects()
+    rows = [display_project(row) for row in read_projects() if display_project(row)["project_year"] == "2026"]
     return {"factsheets": [r for r in rows if r["source"] == "sca_factsheet"],
             "advertised_limited_bids": [r for r in rows if r["source"] in ("sca_advertised", "sca_limited")]}
 
@@ -171,15 +172,15 @@ async def health():
 async def dashboard():
     return """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Bid Monitor</title><style>body{font:15px system-ui,sans-serif;margin:0;background:#f7f9fc;color:#172235}header{background:#102343;color:white;padding:24px}main{padding:24px;max-width:1500px;margin:auto}.controls{display:flex;gap:12px;flex-wrap:wrap;margin:16px 0}select,input{padding:10px;border:1px solid #bbc7d6;border-radius:6px}.wrap{overflow:auto;background:white;border:1px solid #dce3ec;border-radius:8px}table{border-collapse:collapse;width:100%;min-width:950px}th,td{padding:10px;text-align:left;border-bottom:1px solid #e5eaf0;vertical-align:top}th{background:#eaf0f7;position:sticky;top:0}a{color:#0758a5}small{color:#637185}</style></head>
-<body><header><h1>Bid Monitor</h1><span>Public construction opportunities and project factsheets</span></header><main>
-<div class="controls"><label>Source <select id="source"><option value="">All sources</option></select></label><label>Stage <select id="stage"><option value="">All stages</option></select></label><label>Contractor <select id="contact"><option value="">All records</option><option value="named">Named contractor</option><option value="verified">Verified contractor email</option></select></label><label>Search <input id="search" placeholder="Project, contractor, ID"></label></div>
-<p id="status">Loading projects…</p><p id="coverage"></p><div class="wrap"><table><thead><tr><th>Source</th><th>Project</th><th>Stage</th><th>Deadline</th><th>General contractor</th><th>Architect / engineer</th><th>Contractor contact</th><th>Source contact</th><th>First seen</th><th>Source link</th></tr></thead><tbody id="rows"></tbody></table></div><p><small>Bid advertisements often precede contractor selection. SCA factsheets list general contractor and architect/engineer when awarded. Source contacts are agency bid specialists, not contractor contacts. A contractor email is shown only when linked to contact evidence.</small></p></main>
+<body><header><h1>Bid Monitor</h1><span>2026 construction opportunities and project factsheets</span></header><main>
+<div class="controls"><label>Source <select id="source"><option value="">All sources</option></select></label><label>Contractor <select id="contact"><option value="">All records</option><option value="named">Named contractor</option><option value="verified">Verified contractor email</option></select></label><label>Search <input id="search" placeholder="Project, contractor, ID"></label></div>
+<p id="status">Loading projects…</p><p id="coverage"></p><div class="wrap"><table><thead><tr><th>Source</th><th>Project</th><th>Bid amount</th><th>Deadline</th><th>General contractor</th><th>Architect / engineer</th><th>Contractor contact</th><th>Source contact</th><th>First seen</th><th>Source link</th></tr></thead><tbody id="rows"></tbody></table></div><p><small>Only projects with a verified 2026 source date are shown. Amounts retain their source label: bid, award, estimate or budget. Bid advertisements often precede contractor selection. SCA factsheets list general contractor and architect/engineer when awarded. Source contacts are agency bid specialists, not contractor contacts. A contractor email is shown only when linked to contact evidence.</small></p></main>
 <script>
 let all=[];const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function verified(r){return !!(r.contractor&&r.contractor_email&&(r.contact_evidence||'').startsWith('https://'))}
-function show(){const source=document.getElementById('source').value,stage=document.getElementById('stage').value,contact=document.getElementById('contact').value,q=document.getElementById('search').value.toLowerCase();const items=all.filter(r=>(!source||r.source===source)&&(!stage||r.stage===stage)&&(!contact||(contact==='named'?!!r.contractor:verified(r)))&&[r.title,r.contractor,r.architect_engineer,r.source_id,r.source_contact_name].join(' ').toLowerCase().includes(q));document.getElementById('status').textContent=items.length+' projects shown · '+all.length+' total · '+all.filter(r=>r.contractor).length+' named contractors · '+all.filter(verified).length+' verified contractor emails';document.getElementById('rows').innerHTML=items.map(r=>'<tr><td>'+esc(r.source)+'</td><td><strong>'+esc(r.title)+'</strong><br><small>'+esc(r.source_id)+'</small></td><td>'+esc(r.stage)+'</td><td>'+esc(r.deadline)+'</td><td>'+esc(r.contractor||'Not listed')+'</td><td>'+esc(r.architect_engineer||'Not listed')+'</td><td>'+esc(verified(r)?r.contractor_email:'Email not verified')+'<br>'+esc(r.contractor_phone||'Phone not verified')+(r.contact_evidence?'<br><a href="'+esc(r.contact_evidence)+'" target="_blank" rel="noopener noreferrer">Contact evidence</a>':'')+'</td><td>'+esc(r.source_contact_name||'Not listed')+'<br>'+esc(r.source_contact_role)+(r.source_contact_email?'<br>'+esc(r.source_contact_email):'')+(r.source_contact_phone?'<br>'+esc(r.source_contact_phone):'')+'</td><td>'+esc(r.first_seen)+'</td><td><a href="'+esc(r.source_url)+'" target="_blank" rel="noopener noreferrer">View source</a></td></tr>').join('')||'<tr><td colspan="10">No matching projects</td></tr>'}
-async function load(){try{let res=await fetch('/api/projects?limit=5000');if(!res.ok)throw Error('HTTP '+res.status);all=await res.json();for(const id of ['source','stage']){const select=document.getElementById(id),selected=select.value;select.innerHTML='<option value="">All '+(id==='source'?'sources':'stages')+'</option>'+[...new Set(all.map(r=>r[id]).filter(Boolean))].sort().map(s=>'<option value="'+esc(s)+'">'+esc(s)+'</option>').join('');select.value=selected}show();const status=await fetch('/api/status').then(r=>r.json());const run=status.last_run||{},facts=run.sca_factsheets||{};document.getElementById('coverage').textContent='Collector: '+(run.status||'not run yet')+(facts.discovered!==undefined?' · SCA factsheets '+facts.valid+'/'+facts.discovered:'')+(status.running?' · collection in progress':'')}catch(e){document.getElementById('status').textContent='Could not load projects: '+e}}
-for(const id of ['source','stage','contact'])document.getElementById(id).addEventListener('change',show);document.getElementById('search').addEventListener('input',show);load();setInterval(load,60000);
+function show(){const source=document.getElementById('source').value,contact=document.getElementById('contact').value,q=document.getElementById('search').value.toLowerCase();const items=all.filter(r=>(!source||r.source===source)&&(!contact||(contact==='named'?!!r.contractor:verified(r)))&&[r.title,r.contractor,r.architect_engineer,r.source_id,r.source_contact_name].join(' ').toLowerCase().includes(q));document.getElementById('status').textContent=items.length+' projects shown · '+all.length+' total · '+all.filter(r=>r.contractor).length+' named contractors · '+all.filter(verified).length+' verified contractor emails';document.getElementById('rows').innerHTML=items.map(r=>'<tr><td>'+esc(r.source)+'</td><td><strong>'+esc(r.title)+'</strong><br><small>'+esc(r.source_id)+'</small></td><td>'+esc(r.bidding_amount||'Not listed')+'</td><td>'+esc(r.deadline)+'</td><td>'+esc(r.contractor||'Not listed')+'</td><td>'+esc(r.architect_engineer||'Not listed')+'</td><td>'+esc(verified(r)?r.contractor_email:'Email not verified')+'<br>'+esc(r.contractor_phone||'Phone not verified')+(r.contact_evidence?'<br><a href="'+esc(r.contact_evidence)+'" target="_blank" rel="noopener noreferrer">Contact evidence</a>':'')+'</td><td>'+esc(r.source_contact_name||'Not listed')+'<br>'+esc(r.source_contact_role)+(r.source_contact_email?'<br>'+esc(r.source_contact_email):'')+(r.source_contact_phone?'<br>'+esc(r.source_contact_phone):'')+'</td><td>'+esc(r.first_seen)+'</td><td><a href="'+esc(r.source_url)+'" target="_blank" rel="noopener noreferrer">View source</a></td></tr>').join('')||'<tr><td colspan="10">No matching projects</td></tr>'}
+async function load(){try{let res=await fetch('/api/projects?limit=5000');if(!res.ok)throw Error('HTTP '+res.status);all=await res.json();for(const id of ['source']){const select=document.getElementById(id),selected=select.value;select.innerHTML='<option value="">All '+(id==='source'?'sources':'stages')+'</option>'+[...new Set(all.map(r=>r[id]).filter(Boolean))].sort().map(s=>'<option value="'+esc(s)+'">'+esc(s)+'</option>').join('');select.value=selected}show();const status=await fetch('/api/status').then(r=>r.json());const run=status.last_run||{},facts=run.sca_factsheets||{};document.getElementById('coverage').textContent='Collector: '+(run.status||'not run yet')+(facts.discovered!==undefined?' · SCA factsheets '+facts.valid+'/'+facts.discovered:'')+(status.running?' · collection in progress':'')}catch(e){document.getElementById('status').textContent='Could not load projects: '+e}}
+for(const id of ['source','contact'])document.getElementById(id).addEventListener('change',show);document.getElementById('search').addEventListener('input',show);load();setInterval(load,60000);
 </script></body></html>"""
 
 
