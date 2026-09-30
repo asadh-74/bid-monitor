@@ -92,8 +92,9 @@ async def collect_myvendorlink():
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         try:
-            page = await browser.new_page()
-            profile_page = await browser.new_page()
+            context = await browser.new_context()
+            page = await context.new_page()
+            profile_page = await context.new_page()
             await page.goto(ACTIVE, wait_until='domcontentloaded', timeout=45000)
             if await page.locator('#' + PREFIX + 'txtPassword').count():
                 await page.locator('#' + PREFIX + 'txtUsername').fill(email)
