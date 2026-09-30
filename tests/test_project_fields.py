@@ -1,4 +1,6 @@
 import unittest
+from unittest.mock import AsyncMock, patch
+import httpx
 from app.project_fields import project_year, bidding_amount, amount_from_text
 from app.totalbiddata import enrich_record
 
@@ -20,9 +22,35 @@ class ProjectFieldTests(unittest.TestCase):
         self.assertEqual(bidding_amount({'title':'PS021X Roofs Over 4M','source':'sca_limited'}),'Estimated range: over $4 million')
     def test_unknown_amount_is_blank(self):
         self.assertEqual(bidding_amount({'source':'myvendorlink','description':'Bond amount: $5,000'}),'')
+    def test_sca_budget_shorthand_and_month_date(self):
+        self.assertEqual(amount_from_text('Budget: $4M OVER; Status: Design'), 'Budget: $4M OVER')
+        self.assertEqual(amount_from_text('Budget: $500K - $750K'), 'Budget: $500K - $750K')
+        self.assertEqual(project_year({'description':'Design completion date: 2026/11'}), '2026')
+    def test_bid_result_amount_is_visible(self):
+        self.assertIn('$123,000', bidding_amount({'description':'Bid Result: Builder; phone: ; email: ; amount: $123,000'}))
     def test_bidder_amount_does_not_make_bidder_contractor(self):
         row=dict(source='totalbiddata',source_id='1',source_url='https://example.org',title='Roof',deadline='10/1/2026',stage='advertised')
         contacts=[dict(role='Bidder',name='Builder',email='',phone='',amount='$125,000')]
         record=enrich_record(row,{},contacts)
         self.assertEqual(record['contractor'],'')
         self.assertIn('Bidder — Builder: $125,000', bidding_amount(record))
+
+class SourceRetryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_503_is_retried(self):
+        from app.public_sources import get_with_retry
+        request = httpx.Request('GET', 'https://example.org/data')
+        client = AsyncMock()
+        client.get.side_effect = [httpx.Response(503, request=request), httpx.Response(200, request=request)]
+        with patch('app.public_sources.asyncio.sleep', new_callable=AsyncMock):
+            response = await get_with_retry(client, str(request.url))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(client.get.await_count, 2)
+
+    async def test_permanent_error_is_not_hidden(self):
+        from app.public_sources import get_with_retry
+        request = httpx.Request('GET', 'https://example.org/data')
+        client = AsyncMock()
+        client.get.return_value = httpx.Response(404, request=request)
+        with self.assertRaises(httpx.HTTPStatusError):
+            await get_with_retry(client, str(request.url))
+        self.assertEqual(client.get.await_count, 1)
