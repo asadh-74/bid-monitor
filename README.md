@@ -85,3 +85,10 @@ Add these repository secrets under Settings → Secrets and variables → Action
 - MYVENDORLINK_EMAIL and MYVENDORLINK_PASSWORD.
 
 Render environment variables do not transfer to GitHub Actions. Keep Google's existing sheet credentials on Render so it can read the ledger. No website passwords are committed. On Render /api/status, collection_mode=github_actions and status=external indicate dashboard mode; external run status is in GitHub Actions, not that process-local endpoint. Client records refresh from the sheet every minute. To run collection on a developer machine, provide the same environment variables and use python -m app.collect.
+
+
+### 2026 projects and bid amounts
+
+The public /api/projects endpoint and dashboard show only records whose source deadline, advertisement/broadcast date, fiscal year or contract-award date establishes 2026. Scrape timestamps and solicitation IDs do not establish the year. New writes and outreach claims use the same year restriction. Older saved rows remain in the ledger for deduplication and email history; they are hidden publicly rather than deleted. Undated records are excluded until a source date is available.
+
+The visible Stage column and filter are replaced by Bid amount. Internal stage remains in the ledger for outreach rules. Amounts are derived from existing descriptions and title evidence: explicit bid/award contact amounts on Total Bid Data, labelled financial amounts in DASNY and NYSCR markup, SCA budget ranges and advertised title values. Estimate/budget/award labels are retained; these are not misrepresented as submitted bids. MyVendorLink active notices without a stated bid amount show Not listed. No bond amounts, phone numbers or unlabelled currency values are used. The existing sheet schema stays intact, with source amounts stored in Description and exposed as bidding_amount in the API.
