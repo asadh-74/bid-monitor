@@ -11,6 +11,7 @@ The Render app collects public opportunities into one `Projects` tab in the **ex
 | DASNY construction contracts | Listings and pagination from the construction contracts source. |
 | NYS Contract Reporter | Paginated open construction notices (up to `NYSCR_MAX_PAGES`, default 40). The optional `NYSCR_AGENCY_FILTER` narrows the agency; blank means statewide construction. |
 | SCA anticipated CIP and capacity contracts | NYC Open Data's official public datasets `tsak-vtv3` and `6m3u-8rbh`. Dates are left blank when the dataset omits them. These are **anticipated**, not awarded. |
+| Total Bid Data | Authenticated bidding, follow-up, bid-result, and awarded queues. Maps contract and role-labeled contacts to existing columns. |
 | Construction.com / Dodge | Requires an authorized Dodge project API or licensed data feed; the marketing homepage has no downloadable project listing. |
 
 Each collector fails independently and `/api/status` reports its most recent in-process results. `/health` only checks that FastAPI is up. The current site must be redeployed from this branch before new sources appear; repository code alone does not change the live service.
@@ -53,3 +54,11 @@ uvicorn app.main:app --reload
 ```
 
 Scraping can fail when a source changes markup or blocks a Render IP. Inspect `/api/status` and Render logs, then update that source parser; do not treat an empty tab as a successful scrape.
+
+## Total Bid Data setup
+
+Set `TOTALBIDDATA_USERNAME` and `TOTALBIDDATA_PASSWORD` privately in Render Environment. Never commit a password or session token. The collector only reads source pages and writes the existing `Projects` tab; it never clicks Update Contract, Publish, Add or Delete on Total Bid Data. No sheet columns or dashboard layout change.
+
+Each run discovers up to `TOTALBIDDATA_MAX_PAGES` per queue (default 1000) and reads details for up to `TOTALBIDDATA_DETAIL_LIMIT` projects (default 100). Missing projects are processed first, followed by the oldest stored projects; repeated runs progressively backfill the source. `/api/status` reports queue totals, the detail batch limit, errors and pending new records. Initial full backfill can require multiple runs. Increase the detail limit cautiously on free Render; n8n's fixed seven-minute status check may report that a larger run is still running.
+
+Explicit Award, General Contractor, and Contractor contacts map to contractor fields. Bid Result contacts are retained in Description and are not assumed to be awarded contractors. Architect and Engineer roles map to Architect/Engineer. Contact and Owner roles map to source-contact fields. Solicitation, contract and PIN numbers are preserved in Description. Cancellation notices override the queue's stage. Contact evidence links require a Total Bid Data login. New records are not automatically approved for outreach.

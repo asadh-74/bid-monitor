@@ -15,6 +15,7 @@ from .public_sources import collect_awards, collect_dasny, collect_nyscr
 from .renderer import get_renderer
 from .scainfohub_parser import parse_scainfohub_table
 from .scraper import discover_factsheet_pdfs
+from .totalbiddata import collect_totalbiddata
 from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -83,7 +84,7 @@ async def run_full_scrape():
         last_run = {"status": "running"}
         for name, collector in (("dasny", collect_dasny), ("nyscr", collect_nyscr),
                                 ("sca_awards", collect_awards), ("sca_bids", run_scainfohub),
-                                ("sca_factsheets", run_factsheets)):
+                                ("sca_factsheets", run_factsheets), ("totalbiddata", collect_totalbiddata)):
             try:
                 result = await collector()
                 summary[name] = upsert_projects(result) if isinstance(result, list) else result
