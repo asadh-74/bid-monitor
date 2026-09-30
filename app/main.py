@@ -17,6 +17,7 @@ from .scainfohub_parser import parse_scainfohub_table
 from .scraper import discover_factsheet_pdfs
 from .totalbiddata import collect_totalbiddata
 from .myvendorlink import collect_myvendorlink
+from .runtime_config import collectors_enabled
 from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -100,6 +101,8 @@ async def run_full_scrape():
 
 @app.post("/run", dependencies=[Depends(require_admin)])
 async def trigger_run(background_tasks: BackgroundTasks):
+    if not collectors_enabled():
+        raise HTTPException(409, "Collection runs in GitHub Actions; use the Collect bids workflow.")
     if run_lock.locked():
         return {"status": "already_running"}
     background_tasks.add_task(run_full_scrape)
@@ -155,7 +158,8 @@ async def legacy_bids():
 
 @app.get("/api/status")
 async def status():
-    return {"running": run_lock.locked(), "last_run": last_run}
+    return {"running": run_lock.locked(), "last_run": last_run or {"status": "external" if not collectors_enabled() else "not_started"},
+            "collection_mode": "local" if collectors_enabled() else "github_actions"}
 
 
 @app.get("/health")
@@ -181,6 +185,9 @@ for(const id of ['source','stage','contact'])document.getElementById(id).addEven
 
 @app.on_event("startup")
 async def start_scheduler():
+    if not collectors_enabled():
+        log.info("Dashboard mode: collection runs in GitHub Actions")
+        return
     interval = float(os.getenv("SCRAPE_INTERVAL_HOURS", "12"))
     if interval > 0:
         scheduler = AsyncIOScheduler()

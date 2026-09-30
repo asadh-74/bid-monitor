@@ -1,0 +1,51 @@
+name: Collect bids
+
+on:
+  schedule:
+    - cron: '17,47 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bid-monitor-sheet-collector
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      GOOGLE_SHEETS_ID: ${{ secrets.GOOGLE_SHEETS_ID }}
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+      TOTALBIDDATA_USERNAME: ${{ secrets.TOTALBIDDATA_USERNAME }}
+      TOTALBIDDATA_PASSWORD: ${{ secrets.TOTALBIDDATA_PASSWORD }}
+      MYVENDORLINK_EMAIL: ${{ secrets.MYVENDORLINK_EMAIL }}
+      MYVENDORLINK_PASSWORD: ${{ secrets.MYVENDORLINK_PASSWORD }}
+      ENABLE_LOCAL_SCRAPING: 'false'
+      SCRAPE_INTERVAL_HOURS: '0'
+      RENDERER: playwright
+      NYSCR_MAX_PAGES: '40'
+      TOTALBIDDATA_MAX_PAGES: '100'
+      TOTALBIDDATA_DETAIL_LIMIT: '100'
+      MYVENDORLINK_MAX_PAGES: '100'
+      MYVENDORLINK_DETAIL_LIMIT: '100'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Validate collector secrets
+        run: python -c "from app.collect import validate_environment; validate_environment()"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Install Chromium
+        run: python -m playwright install --with-deps chromium
+      - name: Run parser and runtime tests
+        run: python -m unittest discover -s tests -v
+      - name: Collect into the existing Projects sheet
+        run: python -m app.collect
