@@ -108,7 +108,7 @@ def enrich_record(row, fields, contacts):
     for c in contacts:
         details.append(f"{c['role']}: {c['name']}; phone: {c['phone']}; email: {c['email']}; amount: {c['amount']}")
     amounts = [f"{c['role']} — {c['name']}: {c['amount']}" for c in contacts
-               if c['role'].lower() in ('award', 'bidder', 'general contractor', 'contractor')
+               if c['role'].lower() in ('award', 'bidder', 'bid result', 'general contractor', 'contractor')
                and re.fullmatch(r'\$?\s*\d[\d,]*(?:\.\d+)?', c['amount'].strip())
                and float(c['amount'].strip().replace('$', '').replace(',', '')) > 0]
     if amounts:

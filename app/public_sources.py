@@ -172,13 +172,26 @@ async def collect_nyscr():
     return list(collected.values())
 
 
+async def get_with_retry(client, url, **kwargs):
+    """Retry temporary upstream failures; permanent errors still fail visibly."""
+    for attempt in range(4):
+        try:
+            response = await client.get(url, **kwargs)
+            response.raise_for_status()
+            return response
+        except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+            transient = isinstance(exc, httpx.TransportError) or exc.response.status_code in (429, 500, 502, 503, 504)
+            if not transient or attempt == 3:
+                raise
+            await asyncio.sleep(2 ** attempt)
+
+
 async def collect_awards():
     """Official NYC Open Data exports of upcoming SCA CIP and capacity contracts."""
     rows = []
     async with httpx.AsyncClient(timeout=45, follow_redirects=True) as client:
         for kind, url in (("sca_cip_upcoming", SCA_CIP_DATA), ("sca_capacity_upcoming", SCA_CAP_DATA)):
-            response = await client.get(url, params={"$limit": 5000})
-            response.raise_for_status()
+            response = await get_with_retry(client, url, params={"$limit": 5000})
             for item in response.json():
                 title = item.get("upcoming_project_name", "")
                 scope = item.get("upcoming_project_description", "")
@@ -186,6 +199,11 @@ async def collect_awards():
                 if not title or not scope:
                     continue
                 identity = f"{design or title}|{scope}|{item.get('upcoming_project_borough_', '')}"
+                budget = item.get("upcoming_project_budget_range", "")
+                completion = item.get("upcoming_project_design_completion_date", "")
+                # Some CIP records put the budget in the design-date field.
+                if not budget and "$" in completion:
+                    budget, completion = completion, ""
                 rows.append(dict(source=kind, source_id=identity, source_url=url,
                                  title=f"{title} — {scope}", stage="anticipated",
                                  deadline=item.get("upcoming_project_advertised_date", "") or
@@ -193,7 +211,7 @@ async def collect_awards():
                                  description=f"Category: {item.get('upcoming_project_category','')}; "
                                              f"Status: {item.get('upcoming_project_status_','')}; "
                                              f"Borough: {item.get('upcoming_project_borough_','')}; "
-                                             f"Budget: {item.get('upcoming_project_budget_range','')}"))
+                                             f"Budget: {budget}; Design completion date: {completion}"))
     if not rows:
         raise ValueError("NYC Open Data returned no upcoming SCA contracts")
     return rows
