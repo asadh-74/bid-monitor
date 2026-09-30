@@ -165,7 +165,7 @@ async def collect_myvendorlink():
                 stored += upsert_projects(pending)
         finally:
             await browser.close()
-    return {'status': 'complete' if complete and not failures and len(ordered) <= limit else 'partial',
+    return {'status': 'complete' if complete and not failures and not profile_errors and len(ordered) <= limit else 'partial',
             'discovered': len(discovered), 'total': total, 'stored': stored,
             'detail_errors': failures, 'detail_limit': limit, 'listing_complete': complete,
             'profiles_checked': profile_count, 'profile_errors': profile_errors, 'profile_limit': profile_limit}
