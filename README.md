@@ -57,7 +57,7 @@ Scraping can fail when a source changes markup or blocks a Render IP. Inspect `/
 
 ## Total Bid Data setup
 
-Set `TOTALBIDDATA_USERNAME` and `TOTALBIDDATA_PASSWORD` privately in Render Environment. Never commit a password or session token. The collector only reads source pages and writes the existing `Projects` tab; it never clicks Update Contract, Publish, Add or Delete on Total Bid Data. No sheet columns or dashboard layout change.
+Set `TOTALBIDDATA_USERNAME` and `TOTALBIDDATA_PASSWORD` privately in GitHub Actions secrets. Never commit a password or session token. The collector only reads source pages and writes the existing `Projects` tab; it never clicks Update Contract, Publish, Add or Delete on Total Bid Data. No sheet columns or dashboard layout change.
 
 Each run discovers up to `TOTALBIDDATA_MAX_PAGES` per queue (default 1000) and reads details for up to `TOTALBIDDATA_DETAIL_LIMIT` projects (default 100). Missing projects are processed first, followed by the oldest stored projects; repeated runs progressively backfill the source. `/api/status` reports queue totals, the detail batch limit, errors and pending new records. Initial full backfill can require multiple runs. Increase the detail limit cautiously on free Render; n8n's fixed seven-minute status check may report that a larger run is still running.
 
@@ -66,6 +66,22 @@ Explicit Award, General Contractor, and Contractor contacts map to contractor fi
 
 ### MyVendorLink setup
 
-Set `MYVENDORLINK_EMAIL` and `MYVENDORLINK_PASSWORD` privately in Render Environment, then redeploy. Optional `MYVENDORLINK_MAX_PAGES=100` and `MYVENDORLINK_DETAIL_LIMIT=100` control coverage. Missing credentials report `not_configured`. Each run reads active listings and verified detail pages into the existing Projects columns; no schema or dashboard changes are required. Missing records are processed first, followed by the oldest records. Check `myvendorlink` in `/api/status` for coverage and errors.
+Set `MYVENDORLINK_EMAIL` and `MYVENDORLINK_PASSWORD` privately in GitHub Actions secrets, then redeploy. Optional `MYVENDORLINK_MAX_PAGES=100` and `MYVENDORLINK_DETAIL_LIMIT=100` control coverage. Missing credentials report `not_configured`. Each run reads active listings and verified detail pages into the existing Projects columns; no schema or dashboard changes are required. Missing records are processed first, followed by the oldest records. Check `myvendorlink` in GitHub Actions logs for coverage and errors.
 
 The source uses agency plus solicitation number for identity. Detail URLs select a bid through the login session, so stored links point to the active list: sign in and find the agency and solicitation number recorded in the description. Primary procurement contacts populate source-contact columns. Planholders and bidders are not treated as awarded general contractors. Email approval and sending remain in the existing n8n flow.
+
+
+### Free Render: external collection
+
+Render now defaults to dashboard mode. Startup scraping and POST /run are disabled unless ENABLE_LOCAL_SCRAPING=true is explicitly set. Old SCRAPE_INTERVAL_HOURS values alone cannot start collection. Keep Render ENABLE_LOCAL_SCRAPING=false. Existing sheet columns, dashboard layout, and n8n outreach endpoints stay unchanged; disable the old n8n POST /run trigger while keeping reviewed outreach active.
+
+The Collect bids GitHub Actions workflow runs at minutes 17 and 47 each hour (schedules can be delayed), and supports Actions → Collect bids → Run workflow. One run writes to the sheet at a time. Jobs can last up to 90 minutes; overlapping requests wait rather than run concurrently. Each run processes up to 100 detail records per private source, backfilling missing records before refreshing old ones. Total Bid Data scans up to 100 pages per queue and reports partial coverage when capped; raise that limit in the workflow only if its coverage logs require it. Secrets are checked before collection starts. Failed collectors or detail errors mark the job failed; partial backfill is reported in logs.
+
+Add these repository secrets under Settings → Secrets and variables → Actions → New repository secret:
+
+- GOOGLE_SHEETS_ID — the same sheet ID currently configured on Render.
+- GOOGLE_SERVICE_ACCOUNT_JSON — the same full service-account JSON currently configured on Render; the sheet must already be shared with this service account.
+- TOTALBIDDATA_USERNAME and TOTALBIDDATA_PASSWORD.
+- MYVENDORLINK_EMAIL and MYVENDORLINK_PASSWORD.
+
+Render environment variables do not transfer to GitHub Actions. Keep Google's existing sheet credentials on Render so it can read the ledger. No website passwords are committed. On Render /api/status, collection_mode=github_actions and status=external indicate dashboard mode; external run status is in GitHub Actions, not that process-local endpoint. Client records refresh from the sheet every minute. To run collection on a developer machine, provide the same environment variables and use python -m app.collect.
