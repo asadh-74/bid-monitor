@@ -62,3 +62,10 @@ Set `TOTALBIDDATA_USERNAME` and `TOTALBIDDATA_PASSWORD` privately in Render Envi
 Each run discovers up to `TOTALBIDDATA_MAX_PAGES` per queue (default 1000) and reads details for up to `TOTALBIDDATA_DETAIL_LIMIT` projects (default 100). Missing projects are processed first, followed by the oldest stored projects; repeated runs progressively backfill the source. `/api/status` reports queue totals, the detail batch limit, errors and pending new records. Initial full backfill can require multiple runs. Increase the detail limit cautiously on free Render; n8n's fixed seven-minute status check may report that a larger run is still running.
 
 Explicit Award, General Contractor, and Contractor contacts map to contractor fields. Bid Result contacts are retained in Description and are not assumed to be awarded contractors. Architect and Engineer roles map to Architect/Engineer. Contact and Owner roles map to source-contact fields. Solicitation, contract and PIN numbers are preserved in Description. Cancellation notices override the queue's stage. Contact evidence links require a Total Bid Data login. New records are not automatically approved for outreach.
+
+
+### MyVendorLink setup
+
+Set `MYVENDORLINK_EMAIL` and `MYVENDORLINK_PASSWORD` privately in Render Environment, then redeploy. Optional `MYVENDORLINK_MAX_PAGES=100` and `MYVENDORLINK_DETAIL_LIMIT=100` control coverage. Missing credentials report `not_configured`. Each run reads active listings and verified detail pages into the existing Projects columns; no schema or dashboard changes are required. Missing records are processed first, followed by the oldest records. Check `myvendorlink` in `/api/status` for coverage and errors.
+
+The source uses agency plus solicitation number for identity. Detail URLs select a bid through the login session, so stored links point to the active list: sign in and find the agency and solicitation number recorded in the description. Primary procurement contacts populate source-contact columns. Planholders and bidders are not treated as awarded general contractors. Email approval and sending remain in the existing n8n flow.
