@@ -8,6 +8,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from .renderer import get_renderer
+from .project_fields import amount_from_text
 
 log = logging.getLogger(__name__)
 DASNY = "https://www.dasny.org/opportunities/rfps-bids/construction-contracts"
@@ -116,7 +117,7 @@ def parse_nyscr(html, agency_filter="", construction_only=True):
             continue
         records.append(dict(source="nyscr", source_id=cr, source_url=NYSCR,
                             title=title, stage="advertised", deadline=fields.get("due date", ""),
-                            description=f"Agency: {agency}; Category: {fields.get('category', '')}; Location: {fields.get('location', '')}"))
+                            description=f"Agency: {agency}; Category: {fields.get('category', '')}; Location: {fields.get('location', '')}" + ("\nBidding amount: " + amount_from_text(card.get_text(' ', strip=True)) if amount_from_text(card.get_text(' ', strip=True)) else "")))
     return records
 
 
@@ -139,6 +140,9 @@ async def collect_dasny():
                 response = await client.get(row["source_url"])
                 response.raise_for_status()
                 row.update(parse_dasny_contact(response.text, row["source_url"]))
+                amount = amount_from_text(BeautifulSoup(response.text, "html.parser").get_text(" ", strip=True))
+                if amount:
+                    row["description"] += "\nBidding amount: " + amount
             except Exception as exc:
                 log.warning("DASNY contact unavailable for %s: %s", row["source_url"], exc)
     log.info("DASNY contacts found: %d of %d", sum(bool(row.get("source_contact_name")) for row in rows.values()), len(rows))
