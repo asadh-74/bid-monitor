@@ -1,5 +1,6 @@
 """Source-grounded display fields without changing the existing sheet columns."""
 import re
+from .participants import read_participants
 
 MONTHS = r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
 
@@ -18,6 +19,10 @@ def date_year(value):
 
 
 def project_year(record):
+    if record.get("source") == "sca_factsheet":
+        match = re.search(r"(?:^|[;\n])\s*Occupancy date:\s*([^;\n]+)", record.get("description", ""), re.I)
+        if match:
+            return date_year(match.group(1))
     # Deadline is a source project date; first/last-seen timestamps are never used.
     year = date_year(record.get("deadline"))
     if year:
@@ -67,4 +72,4 @@ def bidding_amount(record):
 
 
 def display_project(record):
-    return {**record, "project_year": project_year(record), "bidding_amount": bidding_amount(record)}
+    return {**record, "project_year": project_year(record), "bidding_amount": bidding_amount(record), "participants": read_participants(record)}
