@@ -54,3 +54,42 @@ class SourceRetryTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(httpx.HTTPStatusError):
             await get_with_retry(client, str(request.url))
         self.assertEqual(client.get.await_count, 1)
+
+
+class AwardsOutageTests(unittest.IsolatedAsyncioTestCase):
+    async def collect(self, responses):
+        import sys
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from app.public_sources import collect_awards
+        store = SimpleNamespace(upsert_projects=Mock(return_value=1))
+        with patch.dict(sys.modules, {'app.project_store': store}), patch('app.public_sources.httpx.AsyncClient') as client, patch('app.public_sources.get_with_retry', new_callable=AsyncMock) as fetch:
+            client.return_value.__aenter__ = AsyncMock()
+            client.return_value.__aexit__ = AsyncMock(return_value=False)
+            fetch.side_effect = responses
+            result = await collect_awards()
+        return result, store.upsert_projects
+
+    def response(self, status, items=None):
+        return httpx.Response(status, request=httpx.Request('GET', 'https://example.org/data'), json=items or [])
+
+    async def test_one_outage_preserves_other_dataset(self):
+        good = self.response(200, [{'upcoming_project_name':'School', 'upcoming_project_description':'Roof', 'upcoming_project_budget_range':'$4M OVER', 'upcoming_project_design_completion_date':'2026/11'}])
+        bad = self.response(503)
+        result, write = await self.collect([good, httpx.HTTPStatusError('Unavailable', request=bad.request, response=bad)])
+        self.assertEqual(result['status'], 'partial')
+        self.assertEqual(result['stored'], 1)
+        self.assertEqual(len(write.call_args.args[0]), 1)
+        self.assertEqual(len(result['warnings']), 1)
+
+    async def test_both_outages_keep_saved_data(self):
+        result, write = await self.collect([httpx.ConnectError('Unavailable'), httpx.ConnectError('Unavailable')])
+        self.assertEqual(result['status'], 'partial')
+        self.assertEqual(result['stored'], 0)
+        write.assert_not_called()
+        self.assertEqual(len(result['warnings']), 2)
+
+    async def test_permanent_source_error_still_fails(self):
+        bad = self.response(404)
+        with self.assertRaises(httpx.HTTPStatusError):
+            await self.collect([httpx.HTTPStatusError('Missing source', request=bad.request, response=bad)])

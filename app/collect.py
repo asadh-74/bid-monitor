@@ -24,6 +24,12 @@ async def main():
     validate_environment()
     from .main import run_full_scrape
     summary = await run_full_scrape()
+    for name, result in summary.items():
+        if isinstance(result, dict):
+            for warning in result.get("warnings", []):
+                # Escape GitHub annotation control characters.
+                message = (name + ": " + warning).replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+                print("::warning::" + message)
     # Only operational counters/status, never authenticated HTML or contact data.
     failed = [name for name, result in summary.items()
               if isinstance(result, dict) and (result.get("error") or
