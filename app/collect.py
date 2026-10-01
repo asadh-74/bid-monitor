@@ -24,6 +24,8 @@ async def main():
     validate_environment()
     from .main import run_full_scrape
     summary = await run_full_scrape()
+    from .client_sheet import refresh_client_views
+    print("Client sheet views refreshed: " + json.dumps(refresh_client_views()))
     for name, result in summary.items():
         if isinstance(result, dict):
             for warning in result.get("warnings", []):
