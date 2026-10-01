@@ -188,10 +188,20 @@ async def get_with_retry(client, url, **kwargs):
 
 async def collect_awards():
     """Official NYC Open Data exports of upcoming SCA CIP and capacity contracts."""
+    from .project_store import upsert_projects
     rows = []
+    datasets = {}
     async with httpx.AsyncClient(timeout=45, follow_redirects=True) as client:
         for kind, url in (("sca_cip_upcoming", SCA_CIP_DATA), ("sca_capacity_upcoming", SCA_CAP_DATA)):
-            response = await get_with_retry(client, url, params={"$limit": 5000})
+            try:
+                response = await get_with_retry(client, url, params={"$limit": 5000})
+            except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+                if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code not in (429, 500, 502, 503, 504):
+                    raise
+                datasets[kind] = {"status": "unavailable", "reason": "Temporary upstream failure after retries; existing sheet records retained"}
+                log.warning("SCA dataset %s unavailable after retries; keeping saved records", kind)
+                continue
+            start = len(rows)
             for item in response.json():
                 title = item.get("upcoming_project_name", "")
                 scope = item.get("upcoming_project_description", "")
@@ -212,6 +222,9 @@ async def collect_awards():
                                              f"Status: {item.get('upcoming_project_status_','')}; "
                                              f"Borough: {item.get('upcoming_project_borough_','')}; "
                                              f"Budget: {budget}; Design completion date: {completion}"))
-    if not rows:
+            datasets[kind] = {"status": "complete", "parsed": len(rows) - start}
+    unavailable = [name for name, result in datasets.items() if result["status"] == "unavailable"]
+    if not rows and not unavailable:
         raise ValueError("NYC Open Data returned no upcoming SCA contracts")
-    return rows
+    return {"status": "partial" if unavailable else "complete", "stored": upsert_projects(rows) if rows else 0,
+            "datasets": datasets, "warnings": [name + " temporarily unavailable; saved data retained" for name in unavailable]}
