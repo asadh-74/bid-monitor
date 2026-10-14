@@ -1,101 +1,166 @@
-# Bid Monitor (free Render + Google Sheets)
+# Bid Monitor
 
-The Render app collects public opportunities into one `Projects` tab in the **existing Google Sheet**. The sheet is durable when the free web service sleeps or restarts. `/api/projects` and the dashboard read that tab. n8n owns contact review, AI drafting, Gmail delivery, and writing email status back to the sheet.
+A construction bid monitoring application built during my work as an **Automation Engineer at CYMATICS TECHNOLOGIES**. It collects opportunities from multiple sources, organizes project and contact data in Google Sheets, and serves a searchable FastAPI dashboard.
 
-## Sources
+**[Live dashboard](https://bid-monitor.onrender.com/)** · **[Collection workflow](https://github.com/asadh-74/bid-monitor/actions/workflows/collect-bids.yml)**
 
-| Collector | Coverage |
+## Features
+
+- Unified project records with source IDs, URLs, deadlines, first-seen and last-seen timestamps.
+- Search and filters for source, named contractors/participants, and evidenced contractor email.
+- Published bid, award, estimate and budget values with their source labels.
+- Separate general contractor, architect/engineer, agency contact and participant roles.
+- Linked contact evidence; missing details remain unlisted.
+- Deduplication by source and project ID, preserving outreach history.
+- Organized **Client Projects** and **Project Contacts** views derived from the master **Projects** ledger.
+- Scheduled GitHub Actions collection with independent source error handling.
+- n8n workflow for approved contacts, AI-assisted drafting, Gmail delivery and delivery logging.
+
+The current public view is restricted to projects supported by **2026 source dates**. Scrape timestamps and solicitation numbers alone do not establish the project year.
+
+## Architecture
+
+GitHub Actions runs the collectors and writes to the existing Google Sheet. Render serves the dashboard and APIs from that ledger. n8n handles reviewed contractor outreach.
+
+| Component | Technology |
 | --- | --- |
-| SCA project factsheets | New Schools and Projects in Construction categories; only project PDFs with confirmed project fields are accepted. Historical occupancy dates are marked `historical`. |
-| SCA advertised and limited bids | scainfohub tables; specialist contact is a procurement contact, **not** a contractor recipient. |
-| DASNY construction contracts | Listings and pagination from the construction contracts source. |
-| NYS Contract Reporter | Paginated open construction notices (up to `NYSCR_MAX_PAGES`, default 40). The optional `NYSCR_AGENCY_FILTER` narrows the agency; blank means statewide construction. |
-| SCA anticipated CIP and capacity contracts | NYC Open Data's official public datasets `tsak-vtv3` and `6m3u-8rbh`. Dates are left blank when the dataset omits them. These are **anticipated**, not awarded. |
-| Total Bid Data | Authenticated bidding, follow-up, bid-result, and awarded queues. Maps contract and role-labeled contacts to existing columns. |
-| Construction.com / Dodge | Requires an authorized Dodge project API or licensed data feed; the marketing homepage has no downloadable project listing. |
+| API and dashboard | Python, FastAPI, Uvicorn, HTML/CSS/JavaScript |
+| Browser-based collection | Playwright and Chromium |
+| HTML parsing and requests | Beautiful Soup, HTTPX |
+| PDF extraction | PyMuPDF |
+| Durable ledger and client exports | Google Sheets API, Google service-account authentication |
+| Scheduling and hosting | GitHub Actions, Render |
+| Outreach integration | n8n, Gemini and Gmail |
 
-Each collector fails independently and `/api/status` reports its most recent in-process results. `/health` only checks that FastAPI is up. The current site must be redeployed from this branch before new sources appear; repository code alone does not change the live service.
+Google Sheets is the current durable store; this version does not use a separate relational database. Free Render restarts do not erase sheet records.
 
-## Render configuration
+## Source coverage
 
-Keep the existing `GOOGLE_SHEETS_ID` and `GOOGLE_SERVICE_ACCOUNT_JSON`. Set a long random `ADMIN_TOKEN` as a Render environment secret. The service account must have Editor access to the sheet. The app creates `Projects` with these columns: Source, Source ID, Source URL, Title, Stage, Deadline, Contractor, Contractor Email, Contact Evidence, Description, First Seen UTC, Last Seen UTC, Email Status, Email Sent UTC, Review Notes. Existing `Bids` and SCA tabs are not modified or deleted.
+| Source | Implementation and interpretation |
+| --- | --- |
+| DASNY construction contracts | Public listings and detail collection; agency contacts remain separate from contractors. |
+| NYS Contract Reporter | Paginated construction notices; configurable agency filter. |
+| NYC SCA advertised/limited bids | SCA InfoHub tables, including procurement specialist contacts. |
+| NYC SCA anticipated contracts | Official NYC Open Data CIP/capacity datasets; anticipated projects are not presented as awarded contracts. |
+| NYC SCA factsheets | Official project PDFs; contractor/architect and contract values when published. Occupancy year establishes eligibility for the current view. |
+| Total Bid Data | Authorized login; bidding, follow-up, bid-result and award queues; role-labelled company/contact details. |
+| MyVendorLink | Authorized login; active listings, detail pages and linked company profiles. |
+| NYC SCA BidSet | **Snapshot import:** 289 unique records with 2026 opening dates imported on October 9, 2026. Published ranges and specialist contacts included. Scheduled BidSet collection and document-based contractor/engineer enrichment are not implemented yet. |
+| Construction.com / Dodge | Not integrated; requires an authorized project API or licensed feed. |
 
-A free Render service may sleep between visits; the app starts a collection on wake and repeats it every `SCRAPE_INTERVAL_HOURS` while running. For reliable periodic collection even while it sleeps, schedule an n8n HTTP Request `POST https://bid-monitor.onrender.com/run` with `X-Admin-Token` in n8n's Header Auth credential. The endpoint returns `started` before a run completes; poll `/api/status` for per-source results. Avoid triggering overlapping runs.
+Planholders and bidders are participants, not confirmed awarded general contractors. A published range is not an actual submitted bid. Procurement specialists are not contractor recipients.
 
-Import [`n8n/render_trigger_workflow.json`](n8n/render_trigger_workflow.json) to replace the old three-node Render trigger. It starts inactive, has a manual test and six-hour schedule, warms `/health` with retries for free-tier 503 responses, posts `/run`, waits seven minutes, and checks `/api/status` for completion and source errors. Set `ADMIN_TOKEN` in Render and select an n8n **Header Auth** credential named `X-Admin-Token` with the same secret on **Start Collection**; the secret is not in the JSON. Test manually before publishing the schedule. Persistent 503s or a failed source still require Render log investigation. Keep the older Render trigger inactive to avoid duplicate schedules. Contractor email is a separate reviewed workflow below.
+## Setup
 
-- `GET /` searchable, source-filterable dashboard
-- `GET /api/projects?source=dasny&limit=1000` public feed without private contact columns
-- `GET /api/projects/private` full ledger for n8n, requires `X-Admin-Token`
-- `GET /api/bids` SCA-only compatibility feed with the new schema
-- `GET /api/status` last in-process collector results
-- `POST /run` starts collection, requires `X-Admin-Token`
+### Google Sheets
 
-## Contractor email with n8n
+Share the existing spreadsheet with the service account as an Editor. The app uses:
 
-Import [`n8n/contractor_email_workflow.json`](n8n/contractor_email_workflow.json) as a **separate, inactive** workflow. Configure the Header Auth credential (`X-Admin-Token`) on both HTTP nodes, the Gemini credential, and Gmail credential. Replace `REPLACE_WITH_YOUR_COMPANY_AND_OFFERING` in the AI prompt. Test with your own approved test recipient before activating the hourly trigger. Never place the admin token in the workflow JSON or public dashboard.
+- **Projects:** master ledger, deduplication, contact evidence and outreach state.
+- **Client Projects:** organized client-facing project view.
+- **Project Contacts:** role-labelled contact view.
 
-Only mark a project `APPROVED` in **Email Status** after you confirm that **Contractor Email** belongs to the named **Contractor**, save the public proof URL in **Contact Evidence**, and review the intended outreach. Do not use the SCA procurement specialist's email as a contractor recipient. The n8n workflow:
+Other legacy tabs are preserved. Generated client views are rebuilt after collection; edit the master ledger rather than relying on manual edits in generated views.
 
-1. Read the `Projects` sheet and take only rows with `Email Status = APPROVED`, a named contractor, a validated contractor email and evidence URL.
-2. Calls `POST /api/outreach/claim` to change one row to `SENDING` **before** calling the AI model or Gmail. If a later node fails, investigate the `SENDING` row manually instead of sending it again blindly.
-3. Ask the AI model for a concise email using only the stored project facts and your company's approved offering. Review the prompt and model output before activating automatic sending.
-4. Sends via the connected Gmail node to the exact approved email, then calls `POST /api/outreach/sent` to set `Email Status = SENT`, `Email Sent UTC` and Gmail message ID. If Gmail succeeded but logging failed, check Sent Mail and resolve the `SENDING` row manually.
+### GitHub Actions secrets
 
-Your deactivated `DASNY + NYCSCA + Universal AI Fallback v4` workflow should remain off as a **scraper**; a separate n8n workflow can handle scheduling and email delivery. The repository does not include sender credentials or automatically send email. The sheet's recipient and sender credentials must be connected in n8n before activating it.
+Configure these in **Settings → Secrets and variables → Actions**:
 
-## Local run
+| Secret | Purpose |
+| --- | --- |
+| `GOOGLE_SHEETS_ID` | Existing spreadsheet ID |
+| `GOOGLE_SERVICE_ACCOUNT_JSON` | Full service-account JSON |
+| `TOTALBIDDATA_USERNAME` | Authorized Total Bid Data account |
+| `TOTALBIDDATA_PASSWORD` | Total Bid Data password |
+| `MYVENDORLINK_EMAIL` | Authorized MyVendorLink account |
+| `MYVENDORLINK_PASSWORD` | MyVendorLink password |
+
+The **Collect bids** workflow runs at minutes **17 and 47** each hour, supports manual dispatch, and runs when relevant collector code is pushed to `main`. GitHub schedules may be delayed. A concurrency group prevents overlapping collection jobs; jobs have a 90-minute timeout.
+
+Each private source processes a bounded detail batch, prioritizing missing records and then older records. Large backfills can require multiple runs. Inspect workflow logs for limits, warnings and failed collectors; a successful dashboard load does not prove every source was collected.
+
+### Render environment
+
+Set privately:
+
+- `GOOGLE_SHEETS_ID`
+- `GOOGLE_SERVICE_ACCOUNT_JSON`
+- `ADMIN_TOKEN` — a long, random secret for protected APIs.
+- `ENABLE_LOCAL_SCRAPING=false`
+
+Render is configured as a dashboard service. Startup scraping and `POST /run` are disabled by default. Keep the old n8n Render scraping trigger inactive. Render environment variables do not automatically become GitHub Actions secrets.
+
+The dashboard refreshes its data every minute. Free Render may take time to start after inactivity.
+
+### Local development
 
 ```bash
+python -m venv .venv
+# Activate the virtual environment for your operating system.
 pip install -r requirements.txt
-playwright install chromium
-# Set GOOGLE_SHEETS_ID, GOOGLE_SERVICE_ACCOUNT_JSON, and ADMIN_TOKEN
+python -m playwright install chromium
+
+# Configure environment variables privately using env.example as a reference.
 uvicorn app.main:app --reload
 ```
 
-Scraping can fail when a source changes markup or blocks a Render IP. Inspect `/api/status` and Render logs, then update that source parser; do not treat an empty tab as a successful scrape.
+Run the external collector manually with the required secrets:
 
-## Total Bid Data setup
+```bash
+python -m app.collect
+```
 
-Set `TOTALBIDDATA_USERNAME` and `TOTALBIDDATA_PASSWORD` privately in GitHub Actions secrets. Never commit a password or session token. The collector only reads source pages and writes the existing `Projects` tab; it never clicks Update Contract, Publish, Add or Delete on Total Bid Data. No sheet columns or dashboard layout change.
+Run the existing test suite:
 
-Each run discovers up to `TOTALBIDDATA_MAX_PAGES` per queue (default 1000) and reads details for up to `TOTALBIDDATA_DETAIL_LIMIT` projects (default 100). Missing projects are processed first, followed by the oldest stored projects; repeated runs progressively backfill the source. `/api/status` reports queue totals, the detail batch limit, errors and pending new records. Initial full backfill can require multiple runs. Increase the detail limit cautiously on free Render; n8n's fixed seven-minute status check may report that a larger run is still running.
+```bash
+python -m unittest discover -s tests -v
+```
 
-Explicit Award, General Contractor, and Contractor contacts map to contractor fields. Bid Result contacts are retained in Description and are not assumed to be awarded contractors. Architect and Engineer roles map to Architect/Engineer. Contact and Owner roles map to source-contact fields. Solicitation, contract and PIN numbers are preserved in Description. Cancellation notices override the queue's stage. Contact evidence links require a Total Bid Data login. New records are not automatically approved for outreach.
+## API
 
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| GET | `/` | Searchable dashboard |
+| GET | `/health` | FastAPI process health |
+| GET | `/api/projects?source=dasny&limit=1000` | Public 2026 project feed; maximum limit 5,000 |
+| GET | `/api/bids` | SCA factsheet and advertised/limited compatibility feed |
+| GET | `/api/status` | Collection mode and in-process status |
+| GET | `/api/projects/private` | Private ledger feed; admin token required |
+| POST | `/api/outreach/claim` | Claim one approved outreach record |
+| POST | `/api/outreach/sent` | Record delivery and message ID |
+| POST | `/run` | Local collection only when explicitly enabled; admin token required |
 
-### MyVendorLink setup
+Protected endpoints require the `X-Admin-Token` header. In dashboard mode, `/api/status` reports external collection; **GitHub Actions logs are the source of scheduled-run status**. `/health` does not verify collection freshness or email delivery.
 
-Set `MYVENDORLINK_EMAIL` and `MYVENDORLINK_PASSWORD` privately in GitHub Actions secrets, then redeploy. Optional `MYVENDORLINK_MAX_PAGES=100` and `MYVENDORLINK_DETAIL_LIMIT=100` control coverage. Missing credentials report `not_configured`. Each run reads active listings and verified detail pages into the existing Projects columns; no schema or dashboard changes are required. Missing records are processed first, followed by the oldest records. Check `myvendorlink` in GitHub Actions logs for coverage and errors.
+## Contractor outreach
 
-The source uses agency plus solicitation number for identity. Detail URLs select a bid through the login session, so stored links point to the active list: sign in and find the agency and solicitation number recorded in the description. Primary procurement contacts populate source-contact columns. Planholders and bidders are not treated as awarded general contractors. Email approval and sending remain in the existing n8n flow.
+Import [the contractor email workflow](n8n/contractor_email_workflow.json) into n8n. Configure Header Auth, Gemini and Gmail credentials privately, and replace the company/offer placeholder in the AI prompt.
 
+1. Confirm the named contractor and exact email against contact evidence.
+2. Review the intended outreach and mark **Email Status** as `APPROVED`.
+3. n8n claims the record as `SENDING` before drafting and sending.
+4. AI drafts from stored project facts and the approved company offering.
+5. Gmail sends to the approved recipient; the API logs `SENT`, timestamp and message ID.
 
-### Free Render: external collection
+Test with your own approved recipient before activating the schedule. A row left as `SENDING` requires investigation: check Gmail before retrying, particularly if delivery succeeded but logging failed. Do not automatically email a company inferred only from its name.
 
-Render now defaults to dashboard mode. Startup scraping and POST /run are disabled unless ENABLE_LOCAL_SCRAPING=true is explicitly set. Old SCRAPE_INTERVAL_HOURS values alone cannot start collection. Keep Render ENABLE_LOCAL_SCRAPING=false. Existing sheet columns, dashboard layout, and n8n outreach endpoints stay unchanged; disable the old n8n POST /run trigger while keeping reviewed outreach active.
+The repository includes the integration workflow, not sender credentials. Email delivery depends on the separately configured n8n instance.
 
-The Collect bids GitHub Actions workflow runs at minutes 17 and 47 each hour (schedules can be delayed), and supports Actions → Collect bids → Run workflow. One run writes to the sheet at a time. Jobs can last up to 90 minutes; overlapping requests wait rather than run concurrently. Each run processes up to 100 detail records per private source, backfilling missing records before refreshing old ones. Total Bid Data scans up to 100 pages per queue and reports partial coverage when capped; raise that limit in the workflow only if its coverage logs require it. Secrets are checked before collection starts. Failed collectors or detail errors mark the job failed; partial backfill is reported in logs.
+## Data quality and limitations
 
-Add these repository secrets under Settings → Secrets and variables → Actions → New repository secret:
+- Source layouts, availability and authenticated sessions can change.
+- Missing amounts, contractor names, engineer names or emails are never invented.
+- Historical and undated rows may remain in the ledger for history but are excluded from the public 2026 view.
+- Twelve previously inspected SCA factsheets had 2020–2021 occupancy dates and were excluded by the year rule; this is distinct from a parsing failure.
+- BidSet document enrichment and automatic BidSet refresh remain future work.
+- External website data-entry agents are a future phase, not part of the current application.
+- The application does not submit bids or modify source-site contracts.
 
-- GOOGLE_SHEETS_ID — the same sheet ID currently configured on Render.
-- GOOGLE_SERVICE_ACCOUNT_JSON — the same full service-account JSON currently configured on Render; the sheet must already be shared with this service account.
-- TOTALBIDDATA_USERNAME and TOTALBIDDATA_PASSWORD.
-- MYVENDORLINK_EMAIL and MYVENDORLINK_PASSWORD.
+## Credential handling
 
-Render environment variables do not transfer to GitHub Actions. Keep Google's existing sheet credentials on Render so it can read the ledger. No website passwords are committed. On Render /api/status, collection_mode=github_actions and status=external indicate dashboard mode; external run status is in GitHub Actions, not that process-local endpoint. Client records refresh from the sheet every minute. To run collection on a developer machine, provide the same environment variables and use python -m app.collect.
+Keep passwords, API keys, admin tokens, service-account keys and browser sessions out of commits, screenshots and workflow exports. Use repository secrets, Render environment variables and n8n credentials. Public examples should contain placeholders only.
 
+## Author
 
-### 2026 projects and bid amounts
-
-The public /api/projects endpoint and dashboard show only records whose source deadline, advertisement/broadcast date, fiscal year or contract-award date establishes 2026. Scrape timestamps and solicitation IDs do not establish the year. New writes and outreach claims use the same year restriction. Older saved rows remain in the ledger for deduplication and email history; they are hidden publicly rather than deleted. Undated records are excluded until a source date is available.
-
-The visible Stage column and filter are replaced by Bid amount. Internal stage remains in the ledger for outreach rules. Amounts are derived from existing descriptions and title evidence: explicit bid/award contact amounts on Total Bid Data, labelled financial amounts in DASNY and NYSCR markup, SCA budget ranges and advertised title values. Estimate/budget/award labels are retained; these are not misrepresented as submitted bids. MyVendorLink active notices without a stated bid amount show Not listed. No bond amounts, phone numbers or unlabelled currency values are used. The existing sheet schema stays intact, with source amounts stored in Description and exposed as bidding_amount in the API.
-
-
-### Linked companies and SCA 2026 school openings
-
-SCA factsheets use their verified occupancy year for the 2026 project filter. Contract Award is the dollar value, not the award date: Contract value, Occupancy date and Construction start are preserved in Description. Ten of the known official PDFs list September 2026 occupancy; twelve list 2020–2021 occupancy and remain excluded. Earlier saved factsheets refresh on the next collector run.
-
-The dashboard displays role-labelled participants beside confirmed general contractors, including existing Total Bid Data Plan Holders/Bid Result/CM descriptions and their contact evidence. These participants do not fill the awarded-contractor fields or bypass n8n email approval. MyVendorLink follows only same-site numeric vendor-detail links present in bid participant tables, verifies company identity, and reads primary contacts. Profile enrichment is limited to 100 requests per run (MYVENDORLINK_PROFILE_LIMIT) with a seven-day cache persisted in Description; later runs backfill remaining profiles. Emails absent from profiles remain unlisted. Existing sheet columns are preserved. Total Bid Data detail batches rotate between awarded, bid-result and advertised projects so awarded contractors are not starved by new bidding records. Collection also runs when collector code is merged to main, using the same single-run concurrency group.
+**Asad Hussain** — Automation Engineer  
+[GitHub](https://github.com/asadh-74)
