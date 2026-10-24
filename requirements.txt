@@ -7,4 +7,4 @@ PyMuPDF==1.24.11
 apscheduler==3.10.4
 google-api-python-client==2.147.0
 google-auth==2.35.0
-python-dotenv==1.0.1
+python-dotenv==1.2.2
